@@ -2,8 +2,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "w98link/clock.h"
 #include "w98link/echo.h"
+#include "w98link/linktest.h"
 #include "w98link/transport.h"
 #include "w98link/version.h"
 
@@ -19,6 +22,7 @@ static const char *const help_main =
     "\n"
     "commands:\n"
     "  echo      test the cable and ports against 'W98AGENT echo'\n"
+    "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
     "\n"
     "  w98link --version\n"
     "  w98link <command> --help\n";
@@ -32,6 +36,17 @@ static const char *const help_echo =
     "  --baud N      line speed (default 115200)\n"
     "  --count N     frames to send (default 20)\n"
     "  --size N      payload bytes per frame, up to 1024 (default 1024)\n";
+
+static const char *const help_linktest =
+    "usage: w98link linktest [--line PATH] [--baud N] [--bytes N] [--window N]\n"
+    "\n"
+    "Streams bytes through 'W98AGENT linktest', which echoes them back, and\n"
+    "checks every byte. Both directions run at once.\n"
+    "\n"
+    "  --line PATH   serial device (default " DEFAULT_LINE ", or $W98LINK_LINE)\n"
+    "  --baud N      line speed (default 115200)\n"
+    "  --bytes N     bytes to stream (default 200000)\n"
+    "  --window N    frames in flight, 1-32 (default 16)\n";
 
 /* The topic shown when a command fails, so the help next to an error is
  * about the command that was being run. */
@@ -140,6 +155,65 @@ static int cmd_echo(int argc, char **argv)
     return st.echoed == count ? 0 : 1;
 }
 
+static int cmd_linktest(int argc, char **argv)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    const char *bytes_s = NULL;
+    const char *window_s = NULL;
+    struct opt opts[] = {
+        {"--line", &line}, {"--baud", &baud_s}, {"--bytes", &bytes_s}, {"--window", &window_s},
+    };
+    uint32_t baud = DEFAULT_BAUD;
+    uint32_t bytes = 200000;
+    uint32_t window = WL_LINK_DEFAULT_WINDOW;
+    struct wl_link_cfg cfg;
+    struct wl_linktest_result r;
+    struct wl_transport t;
+    wl_status s;
+
+    if (parse_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
+        return 1;
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if ((baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud)) ||
+        (bytes_s && !parse_u32(bytes_s, "byte count", 100000000U, &bytes)) ||
+        (window_s && !parse_u32(window_s, "window", WL_LINK_MAX_WINDOW, &window)))
+        return 1;
+    if (window == 0)
+        return usage_error("window must be at least", "1");
+
+    cfg.max_payload = WL_SERIAL_MAX_PAYLOAD;
+    cfg.window = (uint8_t)window;
+    cfg.bytes_per_sec = baud / 10U;
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    /* Allow for the link to come up plus the transfer at a pessimistic
+     * quarter of the line rate. */
+    s = wl_linktest_probe(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), bytes,
+                          10000U + (uint32_t)((uint64_t)bytes * 4000U / cfg.bytes_per_sec),
+                          &r);
+    wl_transport_close(&t);
+    if (s != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    printf("echoed %llu of %u bytes, %llu corrupt, %u session(s)\n",
+           (unsigned long long)r.bytes, (unsigned)bytes, (unsigned long long)r.corrupt,
+           (unsigned)r.sessions);
+    printf("frames: %u sent, %u resent (%u timer, %u fast); rx %u ok, %u crc, %u malformed\n",
+           (unsigned)r.stats.data_sent, (unsigned)r.stats.retransmits,
+           (unsigned)r.stats.timeouts, (unsigned)r.stats.fast_retx,
+           (unsigned)r.stats.rx.frames, (unsigned)r.stats.rx.crc,
+           (unsigned)r.stats.rx.malformed);
+    if (r.elapsed_ms > 0)
+        printf("%.1f s, %.0f bytes/s each way, rto %u ms\n", (double)r.elapsed_ms / 1000.0,
+               (double)r.bytes * 1000.0 / (double)r.elapsed_ms, (unsigned)r.stats.rto_ms);
+    return r.bytes == bytes && r.corrupt == 0 ? 0 : 1;
+}
+
 struct command {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -148,6 +222,7 @@ struct command {
 
 static const struct command commands[] = {
     {"echo", cmd_echo, help_echo},
+    {"linktest", cmd_linktest, help_linktest},
 };
 
 static const struct command *find_command(const char *name)

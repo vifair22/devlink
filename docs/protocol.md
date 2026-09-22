@@ -91,7 +91,7 @@ timer recovers it.
 | Value | Name | Purpose |
 |-------|------|---------|
 | 1 | SYNC | start or restart a session (payload: `u32 session_id`, `u16 max_payload`, `u8 window`) |
-| 2 | SYNC_ACK | answer to SYNC (same payload, echoing the peer's session_id) |
+| 2 | SYNC_ACK | answer to SYNC (payload: `u32 echoed_id` of the SYNC being answered, then this side's own SYNC payload) |
 | 3 | DATA | carries the next chunk of the compressed stream |
 | 4 | ACK | acknowledgement only, no payload |
 
@@ -365,3 +365,7 @@ banner when TCP is enabled.
 - Hash function for SYNC (iteration 8).
 - Whether a stored (uncompressed) mode for already-compressed data is worth it
   once real traffic is measured.
+- Adaptive frame size. At several damaged bytes per thousand almost no 1 KiB
+  frame survives, and retransmission cannot fix that; shrinking frames under
+  noise would. Not needed on the cable in use (zero errors measured), so
+  deferred until a noisier line shows up.
