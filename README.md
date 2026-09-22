@@ -12,7 +12,16 @@ Two programs share one protocol core:
   Windows 98 SE and NT 4.0 or later
 
 The first transport is a null-modem serial cable; TCP follows once the target
-has a working network card. See `docs/plan.md` for the iteration plan.
+has a working network card.
+
+- `Manual.md` is the operating manual: installing, running, tuning,
+  diagnosing, and what the limits are.
+- `docs/protocol.md` is the wire format.
+- `docs/plan.md` is the iteration plan and what is done.
+
+Over a 115200 serial cable to a Pentium III running Windows 98 SE, a
+50-file source tree with nothing changed syncs in a quarter of a second, and
+C source moves at about 35-40 KB/s against the line's raw 11.5 KB/s.
 
 Working name only; the project will be renamed.
 
