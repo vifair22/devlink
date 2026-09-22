@@ -12,7 +12,7 @@ is only needed once there is an agent feature to try.
 | 3 | Transport interface, serial on both ends, pty loopback for tests | agent and client echo frames over the real cable |
 | 4 | Reliability: sequence numbers, sliding window, ack/retransmit | survives a lossy simulated link in tests |
 | 5 | Compression: vendored zlib, session-long streams, flush points | measured ratio on source trees; interactive latency OK |
-| 6 | Channels and `exec` with streamed output | `w98link exec 'dir'` over the cable |
+| 6 | Channels and `exec` with streamed output | done: `w98link exec` runs commands on the A21m |
 | 7 | `send` / `get` | round-trip files, including long names |
 | 8 | `sync`: hash manifests, send only changed files | edit-build loop pushes only the delta |
 | 9 | TCP transport | same features over the new NIC |

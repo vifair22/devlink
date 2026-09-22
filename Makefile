@@ -125,7 +125,9 @@ AGENT    := $(BIN_DIR)/W98AGENT.EXE
 
 # -bt=nt/-l=nt is Watcom's Win32 console target, which covers Win9x as well as
 # NT. -za99 is its C99 mode; -w4 -we is the closest it has to -Wall -Werror.
-WAT_FLAGS := -q -bt=nt -l=nt -za99 -w4 -we -ox -I$(INC_DIR) \
+# -k sets the main thread's stack explicitly (1 MiB) rather than trusting the
+# linker default; a few functions keep a maximum-size record on the stack.
+WAT_FLAGS := -q -bt=nt -l=nt -za99 -w4 -we -ox -k1048576 -I$(INC_DIR) \
              '-dW98LINK_VERSION="$(VERSION)_$(BUILD_ID).win98"'
 
 win98: $(AGENT)

@@ -4,9 +4,11 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "w98link/client_exec.h"
 #include "w98link/clock.h"
 #include "w98link/echo.h"
 #include "w98link/linktest.h"
+#include "w98link/proto.h"
 #include "w98link/transport.h"
 #include "w98link/version.h"
 
@@ -21,6 +23,7 @@ static const char *const help_main =
     "usage: w98link <command> [options]\n"
     "\n"
     "commands:\n"
+    "  exec      run a command on the agent and stream its output\n"
     "  echo      test the cable and ports against 'W98AGENT echo'\n"
     "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
     "\n"
@@ -36,6 +39,18 @@ static const char *const help_echo =
     "  --baud N      line speed (default 115200)\n"
     "  --count N     frames to send (default 20)\n"
     "  --size N      payload bytes per frame, up to 1024 (default 1024)\n";
+
+static const char *const help_exec =
+    "usage: w98link exec [--line PATH] [--baud N] [--cwd DIR] [--merge] [--] COMMAND...\n"
+    "\n"
+    "Runs COMMAND on the agent through its shell (command.com on Win9x,\n"
+    "cmd.exe on NT) and streams stdout and stderr back. Exits with the\n"
+    "command's exit status, or 125 if it could not be run at all.\n"
+    "\n"
+    "  --line PATH   serial device (default " DEFAULT_LINE ", or $W98LINK_LINE)\n"
+    "  --baud N      line speed (default 115200)\n"
+    "  --cwd DIR     directory to run in, on the agent (default: its own)\n"
+    "  --merge       send stderr down stdout, preserving their interleaving\n";
 
 static const char *const help_linktest =
     "usage: w98link linktest [--line PATH] [--baud N] [--bytes N] [--window N]\n"
@@ -66,26 +81,56 @@ static int usage_error(const char *what, const char *arg)
  * option parsing: every command has a whitelist of flags, each taking a value
  * ------------------------------------------------------------------------- */
 
+/* A flag either takes a value (value != NULL) or is a switch (on != NULL). */
 struct opt {
     const char *name;
     const char **value;
+    int *on;
 };
 
+/* Parses options up to the first non-option argument or "--"; returns the
+ * index of the first positional argument, or -1 after reporting an error.
+ * Commands without positionals check that it equals argc. */
 static int parse_opts(int argc, char **argv, struct opt *opts, size_t n_opts)
 {
-    for (int i = 0; i < argc; i++) {
+    int i;
+
+    for (i = 0; i < argc; i++) {
         size_t k;
 
+        if (strcmp(argv[i], "--") == 0)
+            return i + 1;
+        if (strncmp(argv[i], "--", 2) != 0)
+            return i;
         for (k = 0; k < n_opts; k++) {
             if (strcmp(argv[i], opts[k].name) == 0)
                 break;
         }
-        if (k == n_opts)
-            return usage_error("unknown option", argv[i]);
-        if (i + 1 >= argc)
-            return usage_error("missing value for option", argv[i]);
+        if (k == n_opts) {
+            (void)usage_error("unknown option", argv[i]);
+            return -1;
+        }
+        if (opts[k].on != NULL) {
+            *opts[k].on = 1;
+            continue;
+        }
+        if (i + 1 >= argc) {
+            (void)usage_error("missing value for option", argv[i]);
+            return -1;
+        }
         *opts[k].value = argv[++i];
     }
+    return i;
+}
+
+static int parse_all_opts(int argc, char **argv, struct opt *opts, size_t n_opts)
+{
+    int first = parse_opts(argc, argv, opts, n_opts);
+
+    if (first < 0)
+        return 1;
+    if (first < argc)
+        return usage_error("unexpected argument", argv[first]);
     return 0;
 }
 
@@ -115,7 +160,10 @@ static int cmd_echo(int argc, char **argv)
     const char *count_s = NULL;
     const char *size_s = NULL;
     struct opt opts[] = {
-        {"--line", &line}, {"--baud", &baud_s}, {"--count", &count_s}, {"--size", &size_s},
+        {"--line", &line, NULL},
+        {"--baud", &baud_s, NULL},
+        {"--count", &count_s, NULL},
+        {"--size", &size_s, NULL},
     };
     uint32_t baud = DEFAULT_BAUD;
     uint32_t count = 20;
@@ -124,7 +172,7 @@ static int cmd_echo(int argc, char **argv)
     struct wl_echo_stats st;
     wl_status s;
 
-    if (parse_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
+    if (parse_all_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
         return 1;
     if (line == NULL)
         line = DEFAULT_LINE;
@@ -196,8 +244,8 @@ static int cmd_linktest(int argc, char **argv)
     const char *window_s = NULL;
     const char *file = NULL;
     struct opt opts[] = {
-        {"--line", &line},       {"--baud", &baud_s}, {"--bytes", &bytes_s},
-        {"--window", &window_s}, {"--file", &file},
+        {"--line", &line, NULL},       {"--baud", &baud_s, NULL}, {"--bytes", &bytes_s, NULL},
+        {"--window", &window_s, NULL}, {"--file", &file, NULL},
     };
     uint8_t *data = NULL;
     uint32_t baud = DEFAULT_BAUD;
@@ -208,7 +256,7 @@ static int cmd_linktest(int argc, char **argv)
     struct wl_transport t;
     wl_status s;
 
-    if (parse_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
+    if (parse_all_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
         return 1;
     if (line == NULL)
         line = DEFAULT_LINE;
@@ -269,6 +317,102 @@ static int cmd_linktest(int argc, char **argv)
     return r.bytes == bytes && r.corrupt == 0 ? 0 : 1;
 }
 
+static void exec_output(void *ctx, uint8_t stream, const uint8_t *p, size_t n)
+{
+    FILE *f = stream == WL_EXEC_STDERR ? stderr : stdout;
+
+    (void)ctx;
+    (void)fwrite(p, 1, n, f);
+    (void)fflush(f);
+}
+
+static struct wl_session_cfg serial_session(uint32_t baud)
+{
+    struct wl_session_cfg cfg;
+
+    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
+    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    cfg.link.bytes_per_sec = baud / 10U;
+    cfg.level = WL_SESSION_DEFAULT_LEVEL;
+    return cfg;
+}
+
+static int cmd_exec(int argc, char **argv)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    const char *cwd = NULL;
+    int merge = 0;
+    struct opt opts[] = {
+        {"--line", &line, NULL},
+        {"--baud", &baud_s, NULL},
+        {"--cwd", &cwd, NULL},
+        {"--merge", NULL, &merge},
+    };
+    uint32_t baud = DEFAULT_BAUD;
+    struct wl_session_cfg cfg;
+    struct wl_exec_io io = {NULL, exec_output};
+    struct wl_exec_result r;
+    struct wl_transport t;
+    char *cmd;
+    size_t len = 0;
+    int first;
+    wl_status s;
+
+    first = parse_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0]));
+    if (first < 0)
+        return 125;
+    if (first >= argc) {
+        (void)usage_error("missing", "COMMAND");
+        return 125;
+    }
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
+        return 125;
+
+    /* The remote shell parses the command line, so the words are simply
+     * joined with spaces, as the user would have typed them there. */
+    for (int i = first; i < argc; i++)
+        len += strlen(argv[i]) + 1;
+    cmd = malloc(len);
+    if (cmd == NULL)
+        return 125;
+    {
+        size_t at = 0;
+
+        for (int i = first; i < argc; i++) {
+            size_t n = strlen(argv[i]);
+
+            if (i > first)
+                cmd[at++] = ' ';
+            memcpy(cmd + at, argv[i], n);
+            at += n;
+        }
+        cmd[at] = '\0';
+    }
+
+    cfg = serial_session(baud);
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        free(cmd);
+        return 125;
+    }
+    s = wl_client_exec(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), cmd, cwd,
+                       merge ? WL_EXEC_MERGE_STDERR : 0, &io, 10000, &r);
+    wl_transport_close(&t);
+    free(cmd);
+    if (s != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 125;
+    }
+    if (!r.ran || r.message[0] != '\0') {
+        fprintf(stderr, "w98link: %s\n", r.message[0] ? r.message : "command failed");
+        return 125;
+    }
+    return (int)(r.exit_code & 0xFFU);
+}
+
 struct command {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -276,6 +420,7 @@ struct command {
 };
 
 static const struct command commands[] = {
+    {"exec", cmd_exec, help_exec},
     {"echo", cmd_echo, help_echo},
     {"linktest", cmd_linktest, help_linktest},
 };
@@ -309,9 +454,12 @@ int main(int argc, char **argv)
     if (c == NULL)
         return usage_error("unknown command", argv[1]);
     active_help = c->help;
-    /* --help anywhere short-circuits option validation, so asking for help
-     * never produces an error about the other arguments. */
-    for (int i = 2; i < argc; i++) {
+    /* --help among the options short-circuits their validation, so asking
+     * for help never produces an error about the other arguments. It stops
+     * at "--" or the first positional: after that the words belong to the
+     * remote command, which may have a --help of its own. */
+    for (int i = 2; i < argc && strcmp(argv[i], "--") != 0 && strncmp(argv[i], "--", 2) == 0;
+         i++) {
         if (strcmp(argv[i], "--help") == 0) {
             fputs(active_help, stdout);
             return 0;

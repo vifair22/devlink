@@ -1,7 +1,7 @@
 # w98link protocol, version 1
 
-Status: agreed in iteration 1. Implemented so far: serial framing, link and
-compression layers (iterations 2-5).
+Status: agreed in iteration 1. Implemented so far: serial framing, link,
+compression, mux and EXEC (iterations 2-6).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
@@ -277,16 +277,22 @@ does no newline or character-set translation.
 STDIN is carried from v1 so that the v2 interactive shell needs no protocol
 change. A v1 client simply sends STDIN_EOF straight away.
 
-Implementation notes for the agent (not wire format):
+Implementation notes for the agent (not wire format), all measured on the
+Windows 98 SE target:
 
-- On Win9x, redirecting the output of `command.com` and 16-bit programs through
-  pipes hangs or loses data unless a 32-bit console relay sits between the
-  agent and the child (Microsoft KB 150956). The agent ships a small relay
-  (`W98RELAY.EXE`) and uses it on platform 1. On NT the child is started with
-  its handles redirected directly.
+- Redirecting output through pipes works for internal commands (`dir`) and
+  real DOS programs (`mem`) alike, so the 32-bit relay that the Win9x pipe
+  bug (Microsoft KB 150956) would have required is not needed. If a program
+  ever does turn up that loses output this way, a relay is the known fix.
+- `command.com` on Win9x always exits with code 0, whatever the program it
+  ran returned. So a command with no shell metacharacters
+  (`|&<>^()%"`) is started directly, which keeps its real exit code;
+  anything that needs the shell goes through it and reports 0 on Win9x.
+  NT's `cmd.exe` passes exit codes through either way.
 - Win9x anonymous pipes cannot be waited on asynchronously, so the agent reads
   each child pipe in its own thread and posts the data to the main loop. The
   same design works on NT, which keeps one code path.
+- stderr stays separate from stdout on both platforms.
 
 ### PUT (client sends a file)
 

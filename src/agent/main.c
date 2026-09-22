@@ -3,16 +3,21 @@
 #include <string.h>
 #include <windows.h>
 
+#include "w98link/agent.h"
 #include "w98link/echo.h"
 #include "w98link/linktest.h"
+#include "w98link/proto.h"
 #include "w98link/transport.h"
 #include "w98link/version.h"
 
 static const char *const help =
     "usage: W98AGENT --version\n"
+    "       W98AGENT serve [PORT] [BAUD]\n"
     "       W98AGENT echo [PORT] [BAUD] [IDLE_SECONDS]\n"
     "       W98AGENT linktest [PORT] [BAUD] [WAIT_SECONDS]\n"
     "\n"
+    "serve  the agent proper: serve w98link clients until stopped (Ctrl-C).\n"
+    "       Defaults: COM1 115200.\n"
     "echo   serve 'w98link echo' from Linux: echo every frame back.\n"
     "       Defaults: COM1 115200 60. Returns when the probe finishes or\n"
     "       after IDLE_SECONDS without a frame.\n"
@@ -27,6 +32,61 @@ static void print_platform(void)
     if (GetVersionExA(&vi))
         printf("windows platform %lu, %lu.%lu build %lu\n", vi.dwPlatformId,
                vi.dwMajorVersion, vi.dwMinorVersion, vi.dwBuildNumber & 0xFFFFU);
+}
+
+static uint8_t platform(void)
+{
+    OSVERSIONINFOA vi;
+
+    vi.dwOSVersionInfoSize = sizeof(vi);
+    if (GetVersionExA(&vi) && vi.dwPlatformId == VER_PLATFORM_WIN32_NT)
+        return WL_PLATFORM_WINNT;
+    return WL_PLATFORM_WIN9X;
+}
+
+static void console_log(void *ctx, const char *msg)
+{
+    SYSTEMTIME t;
+
+    (void)ctx;
+    GetLocalTime(&t);
+    printf("%02u:%02u:%02u %s\n", (unsigned)t.wHour, (unsigned)t.wMinute,
+           (unsigned)t.wSecond, msg);
+    fflush(stdout);
+}
+
+static int cmd_serve(int argc, char **argv)
+{
+    const char *port = argc > 0 ? argv[0] : "COM1";
+    unsigned long baud = argc > 1 ? strtoul(argv[1], NULL, 10) : 115200UL;
+    struct wl_agent_cfg cfg;
+    struct wl_transport t;
+    wl_status s;
+
+    if (argc > 2 || baud == 0) {
+        fputs(help, stderr);
+        return 1;
+    }
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
+    cfg.session.link.window = WL_LINK_DEFAULT_WINDOW;
+    cfg.session.link.bytes_per_sec = (uint32_t)(baud / 10UL);
+    cfg.session.level = WL_SESSION_DEFAULT_LEVEL;
+    cfg.platform = platform();
+    cfg.log = console_log;
+    if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
+        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        return 1;
+    }
+    printf("w98agent %s serving on %s at %lu\n", wl_version(), port, baud);
+    fflush(stdout);
+    s = wl_agent_serve(&t, &cfg, (uint32_t)GetTickCount() ^ (uint32_t)GetCurrentProcessId());
+    wl_transport_close(&t);
+    if (s != WL_OK) {
+        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        return 1;
+    }
+    return 0;
 }
 
 static int cmd_echo(int argc, char **argv)
@@ -105,6 +165,8 @@ int main(int argc, char **argv)
         print_platform();
         return 0;
     }
+    if (argc >= 2 && strcmp(argv[1], "serve") == 0)
+        return cmd_serve(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "echo") == 0)
         return cmd_echo(argc - 2, argv + 2);
     if (argc >= 2 && strcmp(argv[1], "linktest") == 0)
