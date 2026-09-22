@@ -184,7 +184,12 @@ $(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(ZLIB_LIB)
 
 coverage-run: $(COV_BINS)
 	@for t in $(COV_BINS); do $$t >/dev/null || true; done
+# gcov's counters wrap on the hottest inlined functions (sha256's rotations,
+# once a test hashes 100 MB), and gcovr treats the wrapped value as a parse
+# error. Warning once per file keeps the run honest without failing the gate
+# over a known gcov bug (gcc PR 68080).
 	@gcovr --root . --filter 'src/core/.*' --filter 'src/posix/.*' \
+	    --gcov-ignore-parse-errors suspicious_hits.warn_once_per_file \
 	    --fail-under-line 80 --print-summary
 
 # ---------------------------------------------------------------------------

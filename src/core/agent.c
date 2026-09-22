@@ -26,6 +26,7 @@ struct exec {
     size_t pend_len[2];
     int eof[2];
     int exited;
+    int cancelled; /* the client gave up on it; it has been killed */
     uint32_t code;
     int exit_sent;
     int close_sent;
@@ -1012,6 +1013,14 @@ static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, si
         e->stdin_len += k;
     } else if (type == WL_EXEC_STDIN_EOF) {
         e->stdin_eof = 1;
+    } else if (type == WL_EXEC_CANCEL) {
+        /* Killed here, answered in service_exec, which can retry a full mux
+         * queue; a handler cannot. */
+        if (!e->cancelled) {
+            e->cancelled = 1;
+            wl_proc_kill(e->proc);
+            log_line(a, "exec: cancelled by the client", "");
+        }
     }
 }
 
@@ -1057,6 +1066,28 @@ static void service_exec(struct agent *a, struct exec *e)
 {
     static const uint8_t types[2] = {WL_EXEC_STDOUT, WL_EXEC_STDERR};
     static const int streams[2] = {WL_PROC_STDOUT, WL_PROC_STDERR};
+
+    /*
+     * A cancelled command is answered at once rather than by waiting for the
+     * child to die and reporting its real status. Its remaining output and
+     * exit code are of no interest to a client that has given up, and the
+     * child may never die at all: a Win9x DOS VM sitting on a critical-error
+     * prompt ignores TerminateProcess until someone dismisses it. The client
+     * gets its acknowledgement either way and the process goes to the
+     * reaper, which is what keeps the agent serving.
+     */
+    if (e->cancelled) {
+        if (!e->exit_sent) {
+            uint8_t buf[4];
+
+            wl_put_u32le(buf, WL_EXEC_EXIT_CANCELLED);
+            if (wl_peer_send(a->peer, e->ch, WL_EXEC_EXIT, buf, sizeof(buf)) == WL_OK)
+                e->exit_sent = 1;
+        }
+        if (e->exit_sent && wl_peer_close(a->peer, e->ch) == WL_OK)
+            end_exec(a, e);
+        return;
+    }
 
     if (e->stdin_len > 0) {
         size_t n = wl_proc_write(e->proc, e->stdin_q, e->stdin_len);

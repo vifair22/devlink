@@ -163,10 +163,14 @@ inside a DOS VM we cannot reach. Options, in order of appeal:
    VM's own keyboard buffer; nothing in Win32 can inject it. Not worth it.
 2. Give the client a way to give up on one command without killing the
    session: a CANCEL record on the exec channel, mapped to the existing
-   `wl_proc_kill`/reaper path. That turns a 40 s wedge into a deliberate
-   `Ctrl-C` on the client and keeps the session up. This is the useful fix.
-3. Leave it. `dir` on an empty removable drive is a user error with a known
-   cost, and the agent survives it.
+   `wl_proc_kill`/reaper path. **Done 2026-09-22**: `WL_EXEC_CANCEL`, raised
+   by Ctrl-C in `w98link exec`, answered immediately by the agent with EXIT
+   130 and CLOSE. The wedged child goes to the reaper while the session
+   stays up, so the next client is not waiting behind a teardown. Covered by
+   `test_cancel_stops_the_command_on_the_agent`.
+3. Nothing more is planned. `dir` on an empty removable drive still cannot be
+   made to return a real status, because the prompt is below Win32, but it now
+   costs a Ctrl-C rather than a wedge.
 
 Note for the manual: on Win9x anything that needs `command.com` (shell
 builtins, redirection, pipes) runs in a DOS VM, so it neither reports an

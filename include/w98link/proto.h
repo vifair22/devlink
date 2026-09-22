@@ -38,9 +38,14 @@ enum {
     WL_EXEC_STDIN_EOF = 2,
     WL_EXEC_STDOUT = 3,
     WL_EXEC_STDERR = 4,
-    WL_EXEC_EXIT = 5
+    WL_EXEC_EXIT = 5,
+    WL_EXEC_CANCEL = 6 /* client: abandon this command, kill it over there */
 };
 #define WL_EXEC_MERGE_STDERR 0x01U
+/* The exit status the agent reports for a command it killed on CANCEL. The
+ * shell convention for a command interrupted by SIGINT, which is what the
+ * client's Ctrl-C means. */
+#define WL_EXEC_EXIT_CANCELLED 130U
 
 /* PUT and GET channel record types. */
 enum {

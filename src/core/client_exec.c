@@ -9,6 +9,10 @@
 /* After EXIT, how long to keep pumping so our CLOSE and acks reach the
  * agent before the process exits and the port closes. */
 #define LINGER_MS 2000U
+/* How long to wait for the agent to acknowledge a cancel before giving up on
+ * it. Long enough for a round trip on a slow line and a wedged agent's loop,
+ * short enough that a second Ctrl-C is not what ends the client. */
+#define CANCEL_MS 3000U
 
 enum phase { PH_CONNECT, PH_OPENING, PH_RUNNING, PH_DONE, PH_FAILED };
 
@@ -19,6 +23,8 @@ struct client {
     enum phase phase;
     uint16_t ch;
     int sessions;
+    int cancel_sent;
+    uint32_t cancel_at;
 };
 
 static void set_message(struct wl_exec_result *out, const char *msg, size_t n)
@@ -76,6 +82,8 @@ static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, si
         c->io->output(c->io->ctx, type, p, n);
     } else if (type == WL_EXEC_EXIT && n == 4) {
         c->out->exit_code = wl_get_u32le(p);
+        if (c->cancel_sent)
+            c->out->cancel_acked = 1;
         c->phase = PH_DONE;
     }
 }
@@ -197,6 +205,26 @@ wl_status wl_client_exec(struct wl_transport *t, const struct wl_session_cfg *cf
         st = wl_peer_pump(c.peer, t, PUMP_MS);
         if (st != WL_OK)
             break;
+        if (io->cancel != NULL && *io->cancel != 0) {
+            /*
+             * Before the command is running there is nothing over there to
+             * kill, so the caller is obeyed immediately. Once it is running,
+             * CANCEL goes out once and the agent's answer is waited for:
+             * leaving without it would abandon a process on the target.
+             */
+            if (c.phase != PH_RUNNING) {
+                out->cancelled = 1;
+                break;
+            }
+            if (!c.cancel_sent &&
+                wl_peer_send(c.peer, c.ch, WL_EXEC_CANCEL, NULL, 0) == WL_OK) {
+                c.cancel_sent = 1;
+                c.cancel_at = wl_clock_ms();
+                out->cancelled = 1;
+            }
+            if (c.cancel_sent && wl_clock_since(c.cancel_at) >= CANCEL_MS)
+                break;
+        }
         if (c.phase == PH_CONNECT) {
             if (wl_peer_ready(c.peer)) {
                 st = wl_peer_open(c.peer, WL_KIND_EXEC, args, w.len, &c.ch);

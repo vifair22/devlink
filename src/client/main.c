@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -415,6 +416,26 @@ static struct wl_session_cfg serial_session(uint32_t baud)
     return cfg;
 }
 
+/*
+ * Ctrl-C during exec has to reach the agent: killing the client on the spot
+ * would leave the command running on the target, and on Windows 9x an
+ * abandoned command can hold a drive or a file open until the agent's reaper
+ * gets to it. The handler only raises a flag, which the exec loop turns into
+ * a CANCEL record; the message is written with write(), the only output call
+ * safe to make from a handler. The default disposition is restored first, so
+ * a second Ctrl-C ends the client at once if the cancel goes nowhere.
+ */
+static volatile sig_atomic_t exec_cancel;
+
+static void on_interrupt(int sig)
+{
+    static const char msg[] = "\nw98link: cancelling on the target...\n";
+
+    (void)signal(sig, SIG_DFL);
+    exec_cancel = 1;
+    (void)!write(2, msg, sizeof(msg) - 1);
+}
+
 static int cmd_exec(int argc, char **argv)
 {
     const char *line = getenv("W98LINK_LINE");
@@ -429,7 +450,7 @@ static int cmd_exec(int argc, char **argv)
     };
     uint32_t baud = DEFAULT_BAUD;
     struct wl_session_cfg cfg;
-    struct wl_exec_io io = {NULL, exec_output};
+    struct wl_exec_io io = {NULL, exec_output, &exec_cancel};
     struct wl_exec_result r;
     struct wl_transport t;
     char *cmd;
@@ -476,13 +497,25 @@ static int cmd_exec(int argc, char **argv)
         free(cmd);
         return 125;
     }
+    (void)signal(SIGINT, on_interrupt);
     s = wl_client_exec(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), cmd, cwd,
                        merge ? WL_EXEC_MERGE_STDERR : 0, &io, 10000, &r);
+    (void)signal(SIGINT, SIG_DFL);
     wl_transport_close(&t);
     free(cmd);
     if (s != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         return 125;
+    }
+    if (r.cancelled) {
+        if (r.cancel_acked)
+            fprintf(stderr, "w98link: cancelled; the command was killed on the target\n");
+        else if (r.ran)
+            fprintf(stderr, "w98link: cancelled, but the agent did not answer; the "
+                            "command may still be winding down on the target\n");
+        else
+            fprintf(stderr, "w98link: cancelled\n");
+        return 130;
     }
     if (!r.ran || r.message[0] != '\0') {
         fprintf(stderr, "w98link: %s\n", r.message[0] ? r.message : "command failed");

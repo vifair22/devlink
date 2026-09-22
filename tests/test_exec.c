@@ -1,11 +1,13 @@
 #include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <cmocka.h>
 
@@ -107,7 +109,7 @@ static void on_output(void *ctx, uint8_t stream, const uint8_t *p, size_t n)
 static wl_status run(const char *cmd, const char *cwd, uint8_t flags, struct wl_exec_result *r)
 {
     struct wl_session_cfg cfg = fast_session();
-    struct wl_exec_io io = {&cap, on_output};
+    struct wl_exec_io io = {&cap, on_output, NULL};
     static uint32_t seed = 1000;
 
     memset(&cap, 0, sizeof(cap));
@@ -283,6 +285,63 @@ static void test_abandoned_command_does_not_block_the_next_client(void **state)
     assert_int_equal(hello.platform, WL_PLATFORM_LINUX);
 }
 
+/* The flag the client watches, set the way a Ctrl-C would set it: from
+ * somewhere else while wl_client_exec is pumping. */
+static volatile sig_atomic_t test_cancel;
+
+static void *cancel_after_300ms(void *arg)
+{
+    (void)arg;
+    usleep(300000);
+    test_cancel = 1;
+    return NULL;
+}
+
+/*
+ * Cancelling must do three things: return quickly rather than waiting out the
+ * command, tell the caller the agent confirmed it, and actually stop the work
+ * on the agent's side. The marker file proves the third: the command would
+ * create it two seconds in, and it must never appear.
+ */
+static void test_cancel_stops_the_command_on_the_agent(void **state)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_exec_io io = {&cap, on_output, &test_cancel};
+    struct wl_exec_result r;
+    struct wl_hello hello;
+    char marker[64];
+    char cmd[128];
+    pthread_t th;
+    uint32_t start;
+
+    (void)state;
+    memset(&cap, 0, sizeof(cap));
+    test_cancel = 0;
+    sprintf(marker, "/tmp/w98link-cancel-%ld", (long)getpid());
+    (void)remove(marker);
+    sprintf(cmd, "sleep 2; touch %s", marker);
+
+    assert_int_equal(pthread_create(&th, NULL, cancel_after_300ms, NULL), 0);
+    start = wl_clock_ms();
+    assert_int_equal(wl_client_exec(&client_t, &cfg, 7777, cmd, NULL, 0, &io, 5000, &r),
+                     WL_OK);
+    assert_int_equal(pthread_join(th, NULL), 0);
+    assert_true(wl_clock_since(start) < 2000U);
+    assert_true(r.ran);
+    assert_true(r.cancelled);
+    assert_true(r.cancel_acked);
+    assert_int_equal(r.exit_code, WL_EXEC_EXIT_CANCELLED);
+
+    /* The agent must still answer, and the command must be dead rather than
+     * merely disowned. */
+    start = wl_clock_ms();
+    assert_int_equal(wl_client_info(&client_t, &cfg, 8888, 3000, &hello), WL_OK);
+    assert_true(wl_clock_since(start) < 2500U);
+    usleep(2500000);
+    assert_int_equal(access(marker, F_OK), -1);
+    (void)remove(marker);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -298,6 +357,8 @@ int main(void)
                                         teardown),
         cmocka_unit_test_setup_teardown(test_abandoned_command_does_not_block_the_next_client,
                                         setup, teardown),
+        cmocka_unit_test_setup_teardown(test_cancel_stops_the_command_on_the_agent, setup,
+                                        teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -269,10 +269,24 @@ Record types on an EXEC channel:
 | 3 | STDOUT | agent -> client | bytes |
 | 4 | STDERR | agent -> client | bytes |
 | 5 | EXIT | agent -> client | `u32 exit_code` |
+| 6 | CANCEL | client -> agent | none |
 
 The agent sends EXIT once the process has ended and both output pipes are
 drained, then CLOSE. Output is raw bytes in the target's code page; the client
 does no newline or character-set translation.
+
+CANCEL abandons the command: the agent kills the process and answers at once
+with EXIT carrying 130 (the shell's status for an interrupted command)
+followed by CLOSE, without waiting for the process to die or for its output to
+drain. That wait would be unbounded, because a Windows 9x command sitting on a
+DOS critical-error prompt does not die when it is asked to. Anything the
+process still holds is released in the background. The client may send CANCEL
+once per channel and should treat the absence of an answer within a few
+seconds as the agent being unreachable rather than retrying.
+
+Closing an EXEC channel outright has the same effect on the process but tells
+the client nothing, so CANCEL is preferred where the client intends to keep
+the session.
 
 STDIN is carried from v1 so that the v2 interactive shell needs no protocol
 change. A v1 client simply sends STDIN_EOF straight away.

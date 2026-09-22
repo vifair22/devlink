@@ -180,6 +180,34 @@ important caveat.
 **Input:** v1 gives the command an empty stdin. A program that reads input
 sees end of file at once rather than hanging.
 
+**Interrupting a command (Ctrl-C).** Ctrl-C does not simply kill the client:
+it sends a cancel to the agent, which kills the command over there and
+acknowledges, and only then does the client exit, with status 130. This
+matters because a command abandoned on the target keeps whatever it had open,
+and on Windows 9x that can be a drive or a file the next transfer needs.
+
+```
+$ w98link exec 'dir D:\'
+^C
+w98link: cancelling on the target...
+w98link: cancelled; the command was killed on the target
+$ echo $?
+130
+```
+
+The agent answers a cancel immediately rather than waiting for the process to
+die, so the command's remaining output and its real exit status are discarded;
+a command that will not die (see the DOS VM note in section 10) is released in
+the background while the agent goes on serving. If the acknowledgement does
+not arrive within about three seconds the client says so and exits anyway, and
+a second Ctrl-C ends it at once.
+
+Two things cancel cannot promise. It kills the command the agent started, so a
+program that spawned children of its own may leave them behind. And it cannot
+rescue a command stopped at a DOS critical-error prompt: while that prompt is
+up, Windows 98 freezes the agent itself, so the cancel is not read until
+somebody answers the prompt at the target's keyboard. See section 10.
+
 **Agent commands:** a command starting with `@` addresses the agent itself
 rather than the shell. `@stop` is the only one: the agent replies with exit
 status 0 and exits, so its launcher can restart it.
@@ -381,9 +409,15 @@ General failure reading drive D
 Abort, Retry, Fail?               # no output ever arrives; Ctrl-C the client
 ```
 
-The agent survives this and answers a new client on its own, though the
-first client or two afterwards may time out while the VM is being torn
-down. The command is lost either way. Prefer real programs over builtins:
+**While that prompt is up the agent is frozen, and only a keypress at the
+target frees it.** Measured on the A21m: no client was answered for over two
+minutes, and cancelling does not help, because the agent is not running at
+that point; Windows 98 is holding it behind the DOS virtual machine. Press F
+(Fail) on the target's keyboard and everything resumes, including any cancel
+the client sent.
+
+Prevention is therefore the only real defence. Prefer real programs over
+builtins:
 use `w98link get`/`put`/`sync` instead of `copy`, and where a listing is
 needed, a small program rather than `dir`. `SetErrorMode` at agent startup
 covers the agent's own file operations and any Win32 child, so `get` and
@@ -457,4 +491,5 @@ Reported by the client when the agent refuses an operation.
 | 262 | the process could not be started |
 
 Client exit statuses: 0 on success; the remote command's status for `exec`;
-125 when `exec` could not run the command at all; 1 for any other failure.
+130 when an `exec` was cancelled with Ctrl-C; 125 when `exec` could not run
+the command at all; 1 for any other failure.
