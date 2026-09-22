@@ -150,3 +150,12 @@ int wl_fs_join(char *out, size_t cap, const char *root, const char *rel)
     out[rn + 1 + sn] = '\0';
     return 1;
 }
+
+int wl_fs_drive_ready(char letter)
+{
+    /* No drive letters here, so nothing to be unready: the agent's check is
+     * a no-op on the platform the tests run on, which is why the tests
+     * install their own through wl_agent_cfg. */
+    (void)letter;
+    return 1;
+}

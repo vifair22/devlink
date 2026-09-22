@@ -303,6 +303,11 @@ Windows 98 SE target:
   real DOS programs (`mem`) alike, so the 32-bit relay that the Win9x pipe
   bug (Microsoft KB 150956) would have required is not needed. If a program
   ever does turn up that loses output this way, a relay is the known fix.
+- A command naming a drive letter with no media in it is refused with
+  OPEN_FAIL and code 256 (`drive X: is not ready`) rather than started. DOS
+  stops on a critical-error prompt that freezes the agent's whole process, so
+  this is prevention, not politeness; the equivalent 32-bit call fails cleanly
+  because the agent sets SEM_FAILCRITICALERRORS.
 - `command.com` on Win9x always exits with code 0, whatever the program it
   ran returned. So a command with no shell metacharacters
   (`|&<>^()%"`) is started directly, which keeps its real exit code;

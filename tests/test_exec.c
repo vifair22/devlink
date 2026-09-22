@@ -40,6 +40,14 @@ static int should_stop(void *ctx)
     return ((struct agent_thread *)ctx)->stop;
 }
 
+/* Stands in for the target's drives: D is the CD drive with no disc in it.
+ * Linux has no drive letters, so this is the only way to reach the refusal
+ * that keeps an empty drive away from command.com. */
+static int stub_drive_ready(char letter)
+{
+    return letter != 'D';
+}
+
 static void *agent_main(void *arg)
 {
     struct agent_thread *a = arg;
@@ -66,6 +74,7 @@ static int setup(void **state)
     agent.cfg.platform = WL_PLATFORM_LINUX;
     agent.cfg.stop = should_stop;
     agent.cfg.stop_ctx = &agent;
+    agent.cfg.drive_ready = stub_drive_ready;
     assert_int_equal(pthread_create(&agent.th, NULL, agent_main, &agent), 0);
     return 0;
 }
@@ -342,6 +351,47 @@ static void test_cancel_stops_the_command_on_the_agent(void **state)
     (void)remove(marker);
 }
 
+/*
+ * A command naming an empty drive must be refused before it starts. On the
+ * target, starting it costs the whole agent: the DOS prompt it raises freezes
+ * Windows behind it and only a keypress there ends it.
+ */
+static void test_command_naming_an_empty_drive_is_refused(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("dir D:\\", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_NOT_FOUND);
+    assert_string_equal(r.message, "drive D: is not ready");
+
+    /* In an argument, lower case, and with the agent still serving after. */
+    assert_int_equal(run("copy README d:/x", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_NOT_FOUND);
+}
+
+/* The guard must not become a reason for ordinary commands to fail: a ready
+ * drive, and a colon that is not a drive at all, both have to get through. */
+static void test_ready_drives_and_colons_are_not_refused(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("echo C:/ok", NULL, 0, &r), WL_OK);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.out_len, 6);
+    assert_memory_equal(cap.out, "C:/ok\n", 6);
+
+    /* "prod:" ends in d, which would be drive D if letters were taken out of
+     * the middle of a word. */
+    assert_int_equal(run("echo prod: done", NULL, 0, &r), WL_OK);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -358,6 +408,10 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_abandoned_command_does_not_block_the_next_client,
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_cancel_stops_the_command_on_the_agent, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_command_naming_an_empty_drive_is_refused, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_ready_drives_and_colons_are_not_refused, setup,
                                         teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);

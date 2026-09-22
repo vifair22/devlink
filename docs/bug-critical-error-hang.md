@@ -1,6 +1,6 @@
 # Bug: a critical-error prompt on the target hangs the whole agent
 
-Status: fixed and verified on the target; one item still open (see the end). Found 2026-09-22 against agent `0.1.0_20260922.1801.win98`,
+Status: closed. Fixed and verified on the target; see the two corrections at the end. Found 2026-09-22 against agent `0.1.0_20260922.1801.win98`,
 client `0.1.0_20260922.1623.release`, Windows 98 SE 4.10.2222 on the A21m.
 
 ## What happened
@@ -168,9 +168,38 @@ inside a DOS VM we cannot reach. Options, in order of appeal:
    130 and CLOSE. The wedged child goes to the reaper while the session
    stays up, so the next client is not waiting behind a teardown. Covered by
    `test_cancel_stops_the_command_on_the_agent`.
-3. Nothing more is planned. `dir` on an empty removable drive still cannot be
-   made to return a real status, because the prompt is below Win32, but it now
-   costs a Ctrl-C rather than a wedge.
+3. Keep the command away from DOS altogether. **Done 2026-09-22**, and this
+   is what actually solved it: the agent refuses a command naming a drive
+   letter with no media in it (`drives_are_ready` in `src/core/agent.c`,
+   `wl_fs_drive_ready` per platform), because the 32-bit readiness call
+   honours the error mode where `command.com` does not.
+
+## Verified again on the target 2026-09-22, agent build 2206
+
+```
+$ w98link exec 'dir D:\'
+w98link: drive D: is not ready                    (exit 125, 76 ms)
+$ w98link info
+agent    0.1.0_20260922.2206.win98                (43 ms)
+$ w98link exec 'dir C:\W98AGENT'
+ Volume in drive C is WIN98 ...                   (unaffected)
+```
+
+Closed. Two corrections to what is written above, both worth keeping:
+
+- The claim that the agent "survives" a critical-error prompt was wrong. A
+  later run left twelve clients unanswered over two minutes and the agent came
+  back only when the DOS task was ended at the target. While that prompt is up
+  the agent's process does not run at all, which also means CANCEL cannot
+  reach it. The earlier apparent self-recovery must have been the prompt being
+  dealt with on the machine.
+- The prompt is written to the redirected pipe, not the screen, so there may
+  be nothing visible to press F on. That it arrives over the pipe also says
+  DOS is using the standard handles, so writing "F\r\n" to the child's stdin
+  would probably answer it. v1 closes stdin at once (STDIN_EOF), so the VM
+  gets end of file and waits forever. Not pursued, since the command is now
+  refused before it starts, but it is the fallback if a program ever reaches
+  empty media by a route the drive check cannot see.
 
 Note for the manual: on Win9x anything that needs `command.com` (shell
 builtins, redirection, pipes) runs in a DOS VM, so it neither reports an

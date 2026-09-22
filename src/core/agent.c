@@ -239,6 +239,56 @@ static void agent_command(struct agent *a, uint16_t ch, const char *cmd)
     log_line(a, "stopping at the client's request", "");
 }
 
+/*
+ * Refuses a command that names a drive with nothing in it, and says which.
+ *
+ * A Win9x shell builtin that touches empty removable media stops on a DOS
+ * critical-error prompt, and while that prompt is up Windows freezes the
+ * agent itself: the client is not answered, a cancel is not read, and only a
+ * keypress at the target ends it (docs/bug-critical-error-hang.md). There is
+ * no recovering from it from this side, so the command must not be started in
+ * the first place. The check is cheap and 32-bit, so it fails cleanly where
+ * DOS would have prompted.
+ *
+ * Letters are taken from anywhere in the command line, since a drive can be
+ * named in an argument as readily as in the command itself. The false
+ * positive this allows, a letter that happens to be followed by a colon
+ * without meaning a drive, only bites when that drive is also empty, and then
+ * the refusal is a good deal more useful than the freeze.
+ */
+static int drives_are_ready(struct agent *a, const char *cmd, char *bad)
+{
+    int (*ready)(char) = a->cfg->drive_ready != NULL ? a->cfg->drive_ready : wl_fs_drive_ready;
+    uint32_t seen = 0;
+
+    for (size_t i = 0; cmd[i] != '\0'; i++) {
+        char c = cmd[i];
+        unsigned bit;
+
+        if (cmd[i + 1] != ':')
+            continue;
+        if (c >= 'a' && c <= 'z')
+            c = (char)(c - 'a' + 'A');
+        if (c < 'A' || c > 'Z')
+            continue;
+        /* A letter run together with what precedes it is part of a word, not
+         * a drive: the g of "prog:" is not drive G. */
+        if (i > 0 && ((cmd[i - 1] >= 'A' && cmd[i - 1] <= 'Z') ||
+                      (cmd[i - 1] >= 'a' && cmd[i - 1] <= 'z') ||
+                      (cmd[i - 1] >= '0' && cmd[i - 1] <= '9')))
+            continue;
+        bit = 1U << (unsigned)(c - 'A');
+        if ((seen & bit) != 0)
+            continue;
+        seen |= bit;
+        if (!ready(c)) {
+            *bad = c;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
 {
     struct wl_rbuf r;
@@ -291,6 +341,22 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
         free(e->stdin_q);
         e->stdin_q = NULL;
         return;
+    }
+    {
+        char bad = '\0';
+
+        if (!drives_are_ready(a, cmd_z, &bad)) {
+            char msg[64];
+
+            sprintf(msg, "drive %c: is not ready", bad);
+            (void)wl_peer_reject(a->peer, ch, WL_E_NOT_FOUND, msg);
+            log_line(a, "exec refused: ", msg);
+            free(cmd_z);
+            free(cwd_z);
+            free(e->stdin_q);
+            e->stdin_q = NULL;
+            return;
+        }
     }
     st = wl_proc_start(cmd_z, cwd_z, (flags & WL_EXEC_MERGE_STDERR) != 0, &e->proc);
     if (st != WL_OK) {

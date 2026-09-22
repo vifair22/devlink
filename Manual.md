@@ -180,6 +180,14 @@ important caveat.
 **Input:** v1 gives the command an empty stdin. A program that reads input
 sees end of file at once rather than hanging.
 
+**Drives that are not ready.** A command naming a drive letter that has no
+media in it is refused before it starts, with `drive D: is not ready` and exit
+status 125. This is not tidiness: on Windows 9x such a command stops inside DOS
+on a prompt that freezes the whole agent (section 10), so it must never be
+started. Letters are read from the whole command line, including arguments, and
+a letter joined to the word before it (`prod:`) is not treated as a drive. Put
+a disc in and the same command runs.
+
 **Interrupting a command (Ctrl-C).** Ctrl-C does not simply kill the client:
 it sends a cancel to the agent, which kills the command over there and
 acknowledges, and only then does the client exit, with status 130. This
@@ -381,7 +389,8 @@ W98LINK_DEBUG=1 w98link sync ./src C:/SRC/src
 | "Bad command or file name" from a batch file | the file was copied by something that doubled its carriage returns. Copy it with `put`, which is byte-exact |
 | A command's exit status is always 0 | the command went through `command.com`; see section 10 |
 | The agent will not start: "cannot open COM1" | another program holds the port |
-| A command prints `Abort, Retry, Fail?` and never returns | a shell builtin hit a drive with no media; the prompt is inside DOS. See section 10 |
+| `drive D: is not ready` | the command named a drive with no media in it; the agent refused it rather than letting DOS freeze (section 10) |
+| A command prints `Abort, Retry, Fail?` and never returns | DOS reached empty media by a route the drive check could not see. Nothing on the client can help: answer the prompt at the target, or end the DOS task there. See section 10 |
 | Everything stalls, then recovers after ten seconds | the link declared the peer dead and resynchronised; look for a loose connector |
 
 ## 10. Limits and known behaviour
@@ -412,12 +421,18 @@ Abort, Retry, Fail?               # no output ever arrives; Ctrl-C the client
 **While that prompt is up the agent is frozen, and only a keypress at the
 target frees it.** Measured on the A21m: no client was answered for over two
 minutes, and cancelling does not help, because the agent is not running at
-that point; Windows 98 is holding it behind the DOS virtual machine. Press F
-(Fail) on the target's keyboard and everything resumes, including any cancel
-the client sent.
+that point; Windows 98 is holding it behind the DOS virtual machine. Worse, the
+prompt travels down the redirected pipe rather than to the screen, so there may
+be nothing visible to answer: end the DOS task from Close Program
+(Ctrl+Alt+Del), or restart the agent.
 
-Prevention is therefore the only real defence. Prefer real programs over
-builtins:
+Because there is no recovering from it, the agent prevents it: any command
+naming a drive letter with no media is refused before it is started, in about
+70 ms, and the agent goes on serving. The check is a 32-bit call that honours
+the error mode, which is why it fails where DOS prompts. It covers the way this
+is normally reached, a command line that names the drive; a program that opens
+empty media by some other route can still do it, so the rest of this advice
+stands. Prefer real programs over builtins:
 use `w98link get`/`put`/`sync` instead of `copy`, and where a listing is
 needed, a small program rather than `dir`. `SetErrorMode` at agent startup
 covers the agent's own file operations and any Win32 child, so `get` and

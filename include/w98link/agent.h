@@ -29,6 +29,10 @@ struct wl_agent_cfg {
     /* Called for each session, command and failure, for the console. */
     void (*log)(void *ctx, const char *msg);
     void *log_ctx;
+    /* Checks a drive letter named by a command before the command is
+     * started; NULL uses wl_fs_drive_ready. Injected so the tests can
+     * present an empty drive on a machine that has no drive letters. */
+    int (*drive_ready)(char letter);
 };
 
 wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,

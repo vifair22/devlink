@@ -192,3 +192,34 @@ int wl_fs_join(char *out, size_t cap, const char *root, const char *rel)
     out[rn + 1 + sn] = '\0';
     return 1;
 }
+
+int wl_fs_drive_ready(char letter)
+{
+    char root[4];
+    UINT type;
+    DWORD spc;
+    DWORD bps;
+    DWORD freec;
+    DWORD totalc;
+
+    if (letter >= 'a' && letter <= 'z')
+        letter = (char)(letter - 'a' + 'A');
+    if (letter < 'A' || letter > 'Z')
+        return 1;
+    root[0] = letter;
+    root[1] = ':';
+    root[2] = '\\';
+    root[3] = '\0';
+    type = GetDriveTypeA(root);
+    if (type == DRIVE_NO_ROOT_DIR)
+        return 0;
+    if (type != DRIVE_REMOVABLE && type != DRIVE_CDROM)
+        return 1; /* fixed, network or unknown: not worth touching the media */
+    /*
+     * The cheapest call that reaches the media. It fails with ERROR_NOT_READY
+     * on an empty drive rather than prompting, because the agent sets
+     * SEM_FAILCRITICALERRORS at startup; a 32-bit caller honours that, unlike
+     * command.com.
+     */
+    return GetDiskFreeSpaceA(root, &spc, &bps, &freec, &totalc) ? 1 : 0;
+}
