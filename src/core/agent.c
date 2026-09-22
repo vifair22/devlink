@@ -8,6 +8,7 @@
 #include "w98link/fs.h"
 #include "w98link/proc.h"
 #include "w98link/proto.h"
+#include "w98link/sha256.h"
 #include "w98link/wire.h"
 
 #define LOOP_MS 20U
@@ -54,12 +55,45 @@ struct xfer {
     int at_eof;
 };
 
+/* A sync in progress. Manifest paths are only remembered when the client
+ * asked for deletions, which is the one case that needs the whole set. */
+struct sync {
+    int active;
+    uint16_t ch;
+    char root[WL_PATH_MAX];
+    uint8_t flags;
+    int manifest_done;
+    uint32_t same;
+    uint32_t written;
+    uint32_t failed;
+    uint32_t deleted;
+    /* NEED paths are queued here until the mux has room for them. */
+    char (*need)[WL_PATH_MAX];
+    size_t n_need;
+    size_t cap_need;
+    size_t sent_need;
+    /* The manifest's paths, for the deletion pass. */
+    char *seen;
+    size_t seen_len;
+    size_t seen_cap;
+    int seen_overflow;
+    /* The file being received. */
+    FILE *f;
+    char path[WL_PATH_MAX];
+    char tmp[WL_PATH_MAX + 8];
+    uint64_t left;
+    uint64_t mtime;
+    uint32_t crc;
+    int file_bad;
+};
+
 struct agent {
     const struct wl_agent_cfg *cfg;
     struct wl_peer *peer;
     uint32_t reported_gen; /* session whose stream error was already logged */
     struct exec execs[WL_AGENT_MAX_EXEC];
     struct xfer xfers[WL_AGENT_MAX_XFER];
+    struct sync sync;
     int stopping; /* @stop received: finish the exchange, then return */
 };
 
@@ -73,6 +107,9 @@ static void log_line(struct agent *a, const char *prefix, const char *detail)
     (void)snprintf(buf, sizeof(buf), "%s%s", prefix, detail);
     a->cfg->log(a->cfg->log_ctx, buf);
 }
+
+struct sync;
+static void sync_end(struct sync *y);
 
 static struct xfer *find_xfer(struct agent *a, uint16_t ch)
 {
@@ -126,6 +163,8 @@ static void on_session(void *ctx)
         if (a->xfers[i].active)
             end_xfer(&a->xfers[i], 0);
     }
+    if (a->sync.active)
+        sync_end(&a->sync);
     log_line(a, "session: new client", "");
 }
 
@@ -353,6 +392,381 @@ static void open_get(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
     log_line(a, "get: ", x->path);
 }
 
+/* ---------------------------------------------------------------------------
+ * sync
+ * ------------------------------------------------------------------------- */
+
+static void sync_end(struct sync *y)
+{
+    if (y->f != NULL)
+        (void)fclose(y->f);
+    if (y->tmp[0] != '\0')
+        (void)wl_fs_remove(y->tmp);
+    free(y->need);
+    free(y->seen);
+    memset(y, 0, sizeof(*y));
+}
+
+static int sync_queue_need(struct sync *y, const char *rel)
+{
+    if (y->n_need == y->cap_need) {
+        size_t cap = y->cap_need == 0 ? 64 : y->cap_need * 2;
+        char (*grown)[WL_PATH_MAX] = realloc(y->need, cap * WL_PATH_MAX);
+
+        if (grown == NULL)
+            return 0;
+        y->need = grown;
+        y->cap_need = cap;
+    }
+    (void)snprintf(y->need[y->n_need], WL_PATH_MAX, "%s", rel);
+    y->n_need++;
+    return 1;
+}
+
+/* Remembers a manifest path for the deletion pass, as NUL-separated text. */
+static void sync_remember(struct sync *y, const char *rel)
+{
+    size_t n = strlen(rel) + 1;
+
+    if ((y->flags & WL_SYNC_DELETE) == 0 || y->seen_overflow)
+        return;
+    if (y->seen_len + n > y->seen_cap) {
+        size_t cap = y->seen_cap == 0 ? 8192 : y->seen_cap * 2;
+        char *grown;
+
+        while (cap < y->seen_len + n)
+            cap *= 2;
+        /* A tree far bigger than the target's memory stops the deletion
+         * pass rather than the sync: files are still updated, nothing is
+         * removed, and the client is told. */
+        if (cap > (1U << 20)) {
+            y->seen_overflow = 1;
+            return;
+        }
+        grown = realloc(y->seen, cap);
+        if (grown == NULL) {
+            y->seen_overflow = 1;
+            return;
+        }
+        y->seen = grown;
+        y->seen_cap = cap;
+    }
+    memcpy(y->seen + y->seen_len, rel, n);
+    y->seen_len += n;
+}
+
+static int sync_was_listed(const struct sync *y, const char *rel)
+{
+    for (size_t at = 0; at < y->seen_len; at += strlen(y->seen + at) + 1) {
+        if (strcmp(y->seen + at, rel) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Compares one manifest entry with what is on disk here. */
+static void sync_entry(struct agent *a, struct sync *y, const char *rel, uint64_t size,
+                       uint64_t mtime, const uint8_t *hash)
+{
+    char full[WL_PATH_MAX];
+    uint64_t have_size;
+    uint64_t have_mtime;
+    uint8_t digest[32];
+    int is_dir;
+
+    sync_remember(y, rel);
+    if (!wl_fs_join(full, sizeof(full), y->root, rel)) {
+        y->failed++;
+        return;
+    }
+    if (wl_fs_stat(full, &have_size, &have_mtime, &is_dir) != WL_OK || is_dir ||
+        have_size != size) {
+        if (!sync_queue_need(y, rel))
+            y->failed++;
+        return;
+    }
+    if ((have_mtime > mtime ? have_mtime - mtime : mtime - have_mtime) <= WL_MTIME_SLACK) {
+        y->same++;
+        return;
+    }
+    /* Same size, different time: the contents decide. */
+    if (!wl_sha256_file(full, digest) || memcmp(digest, hash, WL_HASH_BYTES) != 0) {
+        if (!sync_queue_need(y, rel))
+            y->failed++;
+        return;
+    }
+    y->same++;
+    /* Only the timestamp differed, so line it up and the next sync takes
+     * the cheap path. */
+    if ((y->flags & WL_SYNC_DRY_RUN) == 0)
+        (void)wl_fs_set_mtime(full, mtime);
+    (void)a;
+}
+
+struct delete_ctx {
+    struct agent *a;
+    struct sync *y;
+};
+
+static int delete_extra(void *ctx, const char *rel, uint64_t size, uint64_t mtime)
+{
+    struct delete_ctx *d = ctx;
+    char full[WL_PATH_MAX];
+
+    (void)size;
+    (void)mtime;
+    if (sync_was_listed(d->y, rel))
+        return 1;
+    if (!wl_fs_join(full, sizeof(full), d->y->root, rel)) {
+        d->y->failed++;
+        return 1;
+    }
+    if ((d->y->flags & WL_SYNC_DRY_RUN) != 0 || wl_fs_remove(full) == WL_OK)
+        d->y->deleted++;
+    else
+        d->y->failed++;
+    return 1;
+}
+
+static void sync_manifest_done(struct agent *a, struct sync *y)
+{
+    y->manifest_done = 1;
+    if ((y->flags & WL_SYNC_DELETE) == 0)
+        return;
+    if (y->seen_overflow) {
+        log_line(a, "sync: too many files to delete safely; nothing removed", "");
+        return;
+    }
+    {
+        struct delete_ctx d;
+
+        d.a = a;
+        d.y = y;
+        /* Hidden files are included: the client decides what it sends, and
+         * a file it never mentions is extraneous either way. */
+        (void)wl_fs_walk(y->root, 1, delete_extra, &d);
+    }
+}
+
+static void sync_file_begin(struct agent *a, struct sync *y, struct wl_rbuf *r)
+{
+    size_t len;
+    const char *rel = wl_r_str(r, &len);
+    uint64_t size = wl_r_u64(r);
+    uint64_t mtime = wl_r_u64(r);
+    char dir[WL_PATH_MAX];
+    char *slash;
+
+    (void)size;
+    y->file_bad = 0;
+    y->crc = 0;
+    y->left = 0;
+    y->mtime = mtime;
+    {
+        char rel_z[WL_PATH_MAX];
+
+        if (r->bad || len == 0 || len >= sizeof(rel_z)) {
+            y->file_bad = 1;
+            y->failed++;
+            return;
+        }
+        memcpy(rel_z, rel, len);
+        rel_z[len] = '\0';
+        if (!wl_fs_join(y->path, sizeof(y->path), y->root, rel_z)) {
+            y->file_bad = 1;
+            y->failed++;
+            return;
+        }
+    }
+    (void)snprintf(dir, sizeof(dir), "%s", y->path);
+    slash = strrchr(dir, '/');
+    if (slash != NULL) {
+        *slash = '\0';
+        if (wl_fs_mkdir_p(dir) != WL_OK) {
+            y->file_bad = 1;
+            y->failed++;
+            log_line(a, "sync: ", wl_error());
+            return;
+        }
+    }
+    if (wl_fs_temp_name(y->path, y->tmp, sizeof(y->tmp)) == WL_OK)
+        y->f = fopen(y->tmp, "wb");
+    if (y->f == NULL) {
+        y->file_bad = 1;
+        y->failed++;
+        y->tmp[0] = '\0';
+    }
+}
+
+static void sync_file_end(struct agent *a, struct sync *y, uint32_t want_crc)
+{
+    if (y->file_bad || y->f == NULL) {
+        y->file_bad = 0;
+        return;
+    }
+    if (fclose(y->f) != 0 || y->crc != want_crc) {
+        y->f = NULL;
+        (void)wl_fs_remove(y->tmp);
+        y->tmp[0] = '\0';
+        y->failed++;
+        log_line(a, "sync: bad copy of ", y->path);
+        return;
+    }
+    y->f = NULL;
+    if (wl_fs_replace(y->tmp, y->path) != WL_OK) {
+        (void)wl_fs_remove(y->tmp);
+        y->tmp[0] = '\0';
+        y->failed++;
+        log_line(a, "sync: ", wl_error());
+        return;
+    }
+    y->tmp[0] = '\0';
+    if (y->mtime != 0)
+        (void)wl_fs_set_mtime(y->path, y->mtime);
+    y->written++;
+    (void)a;
+}
+
+static void on_sync_record(struct agent *a, struct sync *y, uint8_t type, const uint8_t *p,
+                           size_t n)
+{
+    struct wl_rbuf r;
+
+    wl_rbuf_init(&r, p, n);
+    switch (type) {
+    case WL_SYNC_MANIFEST: {
+        uint16_t count = wl_r_u16(&r);
+
+        for (uint16_t i = 0; i < count && !r.bad; i++) {
+            size_t len;
+            const char *rel = wl_r_str(&r, &len);
+            uint64_t size = wl_r_u64(&r);
+            uint64_t mtime = wl_r_u64(&r);
+            const uint8_t *hash = wl_r_take(&r, WL_HASH_BYTES);
+            char rel_z[WL_PATH_MAX];
+
+            if (r.bad || len == 0 || len >= sizeof(rel_z))
+                break;
+            memcpy(rel_z, rel, len);
+            rel_z[len] = '\0';
+            sync_entry(a, y, rel_z, size, mtime, hash);
+        }
+        return;
+    }
+    case WL_SYNC_MANIFEST_END:
+        sync_manifest_done(a, y);
+        return;
+    case WL_SYNC_FILE:
+        sync_file_begin(a, y, &r);
+        return;
+    case WL_SYNC_DATA:
+        if (y->file_bad || y->f == NULL)
+            return;
+        if (n > 0 && fwrite(p, 1, n, y->f) != n) {
+            y->file_bad = 1;
+            y->failed++;
+            log_line(a, "sync: cannot write ", y->path);
+            return;
+        }
+        y->crc = wl_crc32(y->crc, p, n);
+        return;
+    case WL_SYNC_FILE_END:
+        if (n == 4)
+            sync_file_end(a, y, wl_get_u32le(p));
+        return;
+    case WL_SYNC_DONE: {
+        uint8_t buf[8];
+
+        wl_put_u32le(buf, y->written);
+        wl_put_u32le(buf + 4, y->failed);
+        (void)wl_peer_send(a->peer, y->ch, WL_SYNC_SUMMARY, buf, sizeof(buf));
+        log_line(a, "sync: done", "");
+        return;
+    }
+    default:
+        return;
+    }
+}
+
+/* Hands the agent's NEED list to the client as the mux accepts it. */
+static void service_sync(struct agent *a, struct sync *y)
+{
+    uint8_t buf[WL_REC_MAX_PAYLOAD];
+
+    /* 1 means the manifest arrived and the answer is still to go out;
+     * 2 means it has gone. */
+    if (y->manifest_done != 1)
+        return;
+    while (y->sent_need < y->n_need) {
+        struct wl_wbuf w;
+        size_t count = 0;
+
+        wl_wbuf_init(&w, buf, 4096);
+        wl_w_u16(&w, 0);
+        while (y->sent_need + count < y->n_need) {
+            const char *rel = y->need[y->sent_need + count];
+            size_t before = w.len;
+
+            wl_w_str(&w, rel, strlen(rel));
+            if (w.overflow) {
+                w.overflow = 0;
+                w.len = before;
+                break;
+            }
+            count++;
+        }
+        if (count == 0)
+            break;
+        wl_put_u16le(buf, (uint16_t)count);
+        if (wl_peer_send(a->peer, y->ch, WL_SYNC_NEED, buf, w.len) != WL_OK)
+            return;
+        y->sent_need += count;
+    }
+    if (y->sent_need == y->n_need && !y->file_bad) {
+        uint8_t end[8];
+
+        wl_put_u32le(end, y->same);
+        wl_put_u32le(end + 4, y->deleted);
+        if (wl_peer_send(a->peer, y->ch, WL_SYNC_NEED_END, end, sizeof(end)) == WL_OK)
+            y->manifest_done = 2; /* sent */
+    }
+}
+
+static void open_sync(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
+{
+    struct wl_rbuf r;
+    const char *root;
+    size_t root_n;
+    struct sync *y = &a->sync;
+
+    wl_rbuf_init(&r, args, n);
+    root = wl_r_str(&r, &root_n);
+    if (r.bad || root_n == 0 || root_n >= WL_PATH_MAX - 64) {
+        (void)wl_peer_reject(a->peer, ch, WL_E_PATH, "bad sync root");
+        return;
+    }
+    if (y->active) {
+        (void)wl_peer_reject(a->peer, ch, WL_E_PROCESS, "a sync is already running");
+        return;
+    }
+    memset(y, 0, sizeof(*y));
+    memcpy(y->root, root, root_n);
+    y->root[root_n] = '\0';
+    y->flags = wl_r_u8(&r);
+    if ((y->flags & WL_SYNC_DRY_RUN) == 0 && wl_fs_mkdir_p(y->root) != WL_OK) {
+        (void)wl_peer_reject(a->peer, ch, WL_E_ACCESS, wl_error());
+        memset(y, 0, sizeof(*y));
+        return;
+    }
+    if (wl_peer_accept(a->peer, ch) != WL_OK) {
+        memset(y, 0, sizeof(*y));
+        return;
+    }
+    y->active = 1;
+    y->ch = ch;
+    log_line(a, "sync: ", y->root);
+}
+
 static void on_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args, size_t n)
 {
     struct agent *a = ctx;
@@ -366,6 +780,9 @@ static void on_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args, s
         break;
     case WL_KIND_GET:
         open_get(a, ch, args, n);
+        break;
+    case WL_KIND_SYNC:
+        open_sync(a, ch, args, n);
         break;
     default:
         (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "operation not supported");
@@ -451,6 +868,10 @@ static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, si
     struct exec *e = find_exec(a, ch);
     struct xfer *x = find_xfer(a, ch);
 
+    if (a->sync.active && a->sync.ch == ch) {
+        on_sync_record(a, &a->sync, type, p, n);
+        return;
+    }
     if (x != NULL) {
         on_xfer_record(a, x, type, p, n);
         return;
@@ -485,6 +906,10 @@ static void on_closed(void *ctx, uint16_t ch)
     if (x != NULL) {
         (void)wl_peer_close(a->peer, ch);
         end_xfer(x, 0);
+    }
+    if (a->sync.active && a->sync.ch == ch) {
+        (void)wl_peer_close(a->peer, ch);
+        sync_end(&a->sync);
     }
 }
 
@@ -643,6 +1068,8 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
             if (a->xfers[i].active)
                 service_xfer(a, &a->xfers[i]);
         }
+        if (a->sync.active)
+            service_sync(a, &a->sync);
     }
     if (a->stopping && st == WL_OK) {
         /* Give the acknowledgement of @stop time to reach the client, so it
@@ -662,6 +1089,8 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
         if (a->xfers[i].active)
             end_xfer(&a->xfers[i], 0);
     }
+    if (a->sync.active)
+        sync_end(&a->sync);
     wl_peer_free(a->peer);
     free(a);
     return st;

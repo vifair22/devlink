@@ -28,4 +28,23 @@ wl_status wl_fs_remove(const char *path);
  * the same file system. */
 wl_status wl_fs_temp_name(const char *path, char *buf, size_t cap);
 
+/* Joins a root and a relative path with '/', refusing to truncate.
+ * Returns 0 if the result would not fit. */
+int wl_fs_join(char *out, size_t cap, const char *root, const char *rel);
+
+/* Creates a directory and any missing parents. Succeeds if it exists. */
+wl_status wl_fs_mkdir_p(const char *path);
+
+/*
+ * Walks a directory tree, calling back for each regular file with its path
+ * relative to root, using '/' separators. Directories whose name starts with
+ * '.' are skipped unless include_hidden is set, which is what keeps .git out
+ * of a sync by default.
+ *
+ * The callback returns 0 to stop the walk.
+ */
+typedef int (*wl_fs_walk_cb)(void *ctx, const char *rel, uint64_t size, uint64_t mtime);
+
+wl_status wl_fs_walk(const char *root, int include_hidden, wl_fs_walk_cb cb, void *ctx);
+
 #endif

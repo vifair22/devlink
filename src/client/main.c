@@ -10,6 +10,7 @@
 #include "w98link/echo.h"
 #include "w98link/linktest.h"
 #include "w98link/proto.h"
+#include "w98link/sync.h"
 #include "w98link/transport.h"
 #include "w98link/version.h"
 
@@ -27,6 +28,7 @@ static const char *const help_main =
     "  exec      run a command on the agent and stream its output\n"
     "  put       copy a local file to the agent\n"
     "  get       copy a file from the agent\n"
+    "  sync      copy a directory to the agent, sending only what differs\n"
     "  info      show the agent's version and platform\n"
     "  echo      test the cable and ports against 'W98AGENT echo'\n"
     "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
@@ -55,6 +57,17 @@ static const char *const help_exec =
     "  --baud N      line speed (default 115200)\n"
     "  --cwd DIR     directory to run in, on the agent (default: its own)\n"
     "  --merge       send stderr down stdout, preserving their interleaving\n";
+
+static const char *const help_sync =
+    "usage: w98link sync [--line PATH] [--baud N] [--delete] [--dry-run]\n"
+    "                    [--hidden] LOCALDIR REMOTEDIR\n"
+    "\n"
+    "Makes REMOTEDIR on the agent match LOCALDIR, sending only files that\n"
+    "differ in size, time or contents. Names starting with a dot are skipped\n"
+    "unless --hidden is given, which is what keeps .git out of it.\n"
+    "\n"
+    "  --delete      remove files on the agent that are not here\n"
+    "  --dry-run     report what would be sent, change nothing\n";
 
 static const char *const help_info =
     "usage: w98link info [--line PATH] [--baud N]\n"
@@ -542,6 +555,66 @@ static int cmd_transfer(int argc, char **argv, int is_put)
     return r.ok ? 0 : 1;
 }
 
+static int cmd_sync(int argc, char **argv)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    int delete_extra = 0;
+    int dry_run = 0;
+    int hidden = 0;
+    struct opt opts[] = {
+        {"--line", &line, NULL},        {"--baud", &baud_s, NULL},
+        {"--delete", NULL, &delete_extra}, {"--dry-run", NULL, &dry_run},
+        {"--hidden", NULL, &hidden},
+    };
+    uint32_t baud = DEFAULT_BAUD;
+    struct wl_session_cfg cfg;
+    struct wl_sync_result r;
+    struct wl_transport t;
+    char *paths[2];
+    int n_paths;
+    uint8_t flags = 0;
+    wl_status s;
+
+    n_paths = parse_opts_mixed(argc, argv, opts, sizeof(opts) / sizeof(opts[0]), paths, 2);
+    if (n_paths < 0)
+        return 1;
+    if (n_paths != 2)
+        return usage_error("expects two directories, got",
+                           n_paths == 1 ? paths[0] : "none");
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
+        return 1;
+    flags = (uint8_t)((delete_extra ? WL_SYNC_DELETE : 0) | (dry_run ? WL_SYNC_DRY_RUN : 0) |
+                      (hidden ? WL_SYNC_HIDDEN : 0));
+
+    cfg = serial_session(baud);
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    s = wl_client_sync(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), paths[0],
+                       paths[1], flags, 10000, &r);
+    wl_transport_close(&t);
+    if (s != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    printf("%u file(s) here, %u already there, %u to send\n", (unsigned)r.scanned,
+           (unsigned)r.same, (unsigned)r.needed);
+    if (dry_run) {
+        printf("dry run: nothing was changed\n");
+        return 0;
+    }
+    printf("sent %u, deleted %u, failed %u; %llu bytes in %.1f s\n", (unsigned)r.written,
+           (unsigned)r.deleted, (unsigned)r.failed, (unsigned long long)r.bytes,
+           (double)r.elapsed_ms / 1000.0);
+    if (!r.ok && r.message[0] != '\0')
+        fprintf(stderr, "w98link: %s\n", r.message);
+    return r.ok ? 0 : 1;
+}
+
 static int cmd_info(int argc, char **argv)
 {
     const char *line = getenv("W98LINK_LINE");
@@ -596,6 +669,7 @@ struct command {
 
 static const struct command commands[] = {
     {"exec", cmd_exec, help_exec},
+    {"sync", cmd_sync, help_sync},
     {"info", cmd_info, help_info},
     {"put", cmd_put, help_put},
     {"get", cmd_get, help_get},

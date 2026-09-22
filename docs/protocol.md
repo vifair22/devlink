@@ -1,7 +1,7 @@
 # w98link protocol, version 1
 
-Status: agreed in iteration 1. Implemented so far: everything except SYNC
-and the TCP transport (iterations 2-7).
+Status: agreed in iteration 1. Implemented so far: everything except the TCP
+transport (iterations 2-8).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
@@ -330,11 +330,49 @@ PUT and GET both run over a channel of their kind with these record types:
 
 ### SYNC (make a directory on the agent match one on the client)
 
-Specified in detail in iteration 8. The outline: the client sends a manifest of
-`(relative path, size, mtime, hash)` records; the agent compares it with its
-own tree and replies with the paths it needs; the client then sends those files
-over the same channel using PUT's record types. Deletions only happen when the
-client asks for them. The hash function is not chosen yet.
+OPEN arguments: `str root` (the directory on the agent), `u8 flags` (bit 0:
+delete files the manifest does not list; bit 1: dry run, change nothing).
+
+| Type | Name | Direction | Payload |
+|------|------|-----------|---------|
+| 1 | MANIFEST | client -> agent | `u16 count`, then that many entries |
+| 2 | MANIFEST_END | client -> agent | none |
+| 3 | NEED | agent -> client | `u16 count`, then that many `str` paths |
+| 4 | NEED_END | agent -> client | `u32 same`, `u32 deleted` |
+| 5 | FILE | client -> agent | `str rel`, `u64 size`, `u64 mtime` |
+| 6 | DATA | client -> agent | bytes |
+| 7 | FILE_END | client -> agent | `u32 crc32` |
+| 8 | FILE_FAIL | agent -> client | `str rel`, `u16 code`, `str message` |
+| 9 | DONE | client -> agent | none |
+| 10 | SUMMARY | agent -> client | `u32 written`, `u32 failed` |
+
+A manifest entry is `str rel`, `u64 size`, `u64 mtime`, then 16 bytes of hash:
+the first half of the file's SHA-256. Paths are relative to the root, with `/`
+separators, and never contain `.` or `..` components.
+
+The exchange runs in one pass:
+
+1. The client walks its directory and sends the whole manifest, batched into
+   records, then MANIFEST_END.
+2. For each entry the agent decides whether it already has that file: missing
+   or a different size means it is needed; the same size and a modification
+   time within two seconds means it is not; otherwise the agent hashes its
+   copy and compares. When only the time differed, the agent sets its file's
+   time to the client's, so the next sync takes the cheap path.
+3. The agent sends the paths it needs, then NEED_END with how many matched and
+   how many it deleted.
+4. The client sends those files back to back, each as FILE, DATA records and
+   FILE_END, without waiting for an answer between them, then DONE. The agent
+   reports only failures, as FILE_FAIL, and finishes with SUMMARY.
+
+Each file is written to a temporary name and renamed once its CRC matches, as
+in PUT, and missing parent directories are created. Deletions happen after the
+manifest is complete, so an interrupted sync never deletes anything it has not
+yet been told about.
+
+Hashing the whole tree on the agent every time would be slow on the target's
+disk, which is why the size and time check comes first and hashing is the
+exception rather than the rule.
 
 ## Paths and times
 
