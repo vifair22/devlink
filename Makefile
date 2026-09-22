@@ -37,6 +37,13 @@ CORE_SOURCES   := $(wildcard $(SRC_DIR)/core/*.c)
 CLIENT_SOURCES := $(wildcard $(SRC_DIR)/client/*.c) $(wildcard $(SRC_DIR)/posix/*.c)
 AGENT_SOURCES  := $(wildcard $(SRC_DIR)/agent/*.c) $(wildcard $(SRC_DIR)/win32/*.c)
 
+# Vendored zlib: built once with its own flags into an archive, never subject
+# to this project's warnings, analysis or coverage (third_party/zlib/VENDORED.md).
+ZLIB_DIR     := third_party/zlib
+ZLIB_SOURCES := $(addprefix $(ZLIB_DIR)/,adler32.c crc32.c deflate.c inffast.c \
+                inflate.c inftrees.c trees.c zutil.c)
+ZLIB_LIB     := $(BUILD_DIR)/zlib/libz.a
+
 # Tests link the core and the POSIX platform layer, never the client's main().
 LIB_SOURCES    := $(CORE_SOURCES) $(wildcard $(SRC_DIR)/posix/*.c)
 NATIVE_SOURCES := $(CORE_SOURCES) $(CLIENT_SOURCES)
@@ -50,7 +57,8 @@ WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wunused -Wunused-function \
 
 HARDENING := -fstack-protector-strong -fstack-clash-protection
 
-CPPFLAGS_COMMON := -I$(INC_DIR) -D_GNU_SOURCE \
+# -isystem, so zlib.h is held to system-header rules rather than ours.
+CPPFLAGS_COMMON := -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_GNU_SOURCE \
                    -DW98LINK_VERSION='"$(VERSION)_$(BUILD_ID).$(VARIANT)"'
 CFLAGS_COMMON   := -std=c11 $(WARNINGS) $(HARDENING) -Werror
 
@@ -81,8 +89,18 @@ OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(NATIVE_SOURCES))
 
 variant: $(OUT)
 
-$(OUT): $(OBJECTS) | $(BIN_DIR)
-	$(CC) $(CFLAGS_COMMON) $(VARIANT_FLAGS) -o $@ $(OBJECTS)
+$(OUT): $(OBJECTS) $(ZLIB_LIB) | $(BIN_DIR)
+	$(CC) $(CFLAGS_COMMON) $(VARIANT_FLAGS) -o $@ $(OBJECTS) $(ZLIB_LIB)
+
+ZLIB_OBJECTS := $(patsubst $(ZLIB_DIR)/%.c,$(BUILD_DIR)/zlib/%.o,$(ZLIB_SOURCES))
+
+$(ZLIB_LIB): $(ZLIB_OBJECTS)
+	@rm -f $@
+	ar rcs $@ $(ZLIB_OBJECTS)
+
+$(BUILD_DIR)/zlib/%.o: $(ZLIB_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -w -I$(ZLIB_DIR) -c $< -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -112,12 +130,19 @@ WAT_FLAGS := -q -bt=nt -l=nt -za99 -w4 -we -ox -I$(INC_DIR) \
 
 win98: $(AGENT)
 
-$(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) | $(BIN_DIR)
+WAT_ZLIB_FLAGS := -q -bt=nt -za99 -w0 -ox -I$(ZLIB_DIR)
+WAT_ZLIB_OBJS  := $(patsubst $(ZLIB_DIR)/%.c,$(WAT_DIR)/zlib/%.obj,$(ZLIB_SOURCES))
+
+$(WAT_DIR)/zlib/%.obj: $(ZLIB_DIR)/%.c
 	@test -x $(WATCOM)/binl64/wcl386 || { \
 	    echo "Open Watcom not found at $(WATCOM); set WATCOM=" >&2; exit 1; }
+	@mkdir -p $(dir $@)
+	$(WAT_ENV) wcl386 -c $(WAT_ZLIB_FLAGS) -fo=$@ $<
+
+$(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) | $(BIN_DIR)
 	@mkdir -p $(WAT_DIR)
-	$(WAT_ENV) wcl386 $(WAT_FLAGS) -fo=$(WAT_DIR)/ -fe=$@ \
-	    $(CORE_SOURCES) $(AGENT_SOURCES)
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -I$(ZLIB_DIR) -fo=$(WAT_DIR)/ -fe=$@ \
+	    $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS)
 
 # ---------------------------------------------------------------------------
 # tests
@@ -126,9 +151,9 @@ $(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) | $(BIN_DIR)
 TEST_SOURCES := $(wildcard $(TEST_DIR)/test_*.c)
 TEST_BINS    := $(patsubst $(TEST_DIR)/test_%.c,$(BIN_DIR)/test_%,$(TEST_SOURCES))
 
-$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) | $(BIN_DIR)
+$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(ZLIB_LIB) | $(BIN_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
-	    -pthread -I$(TEST_DIR) -o $@ $< $(LIB_SOURCES) -lcmocka
+	    -pthread -I$(TEST_DIR) -o $@ $< $(LIB_SOURCES) $(ZLIB_LIB) -lcmocka
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do \
@@ -150,10 +175,10 @@ coverage:
 
 COV_BINS := $(patsubst $(TEST_DIR)/test_%.c,$(BUILD_DIR)/coverage/test_%,$(TEST_SOURCES))
 
-$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES)
+$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(ZLIB_LIB)
 	@mkdir -p $(BUILD_DIR)/coverage
 	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -I$(TEST_DIR) \
-	    -pthread -o $@ $< $(LIB_SOURCES) -lcmocka
+	    -pthread -o $@ $< $(LIB_SOURCES) $(ZLIB_LIB) -lcmocka
 
 coverage-run: $(COV_BINS)
 	@for t in $(COV_BINS); do $$t >/dev/null || true; done

@@ -39,14 +39,17 @@ static const char *const help_echo =
 
 static const char *const help_linktest =
     "usage: w98link linktest [--line PATH] [--baud N] [--bytes N] [--window N]\n"
+    "                        [--file PATH]\n"
     "\n"
-    "Streams bytes through 'W98AGENT linktest', which echoes them back, and\n"
-    "checks every byte. Both directions run at once.\n"
+    "Streams data through 'W98AGENT linktest', which echoes it back, and\n"
+    "checks every byte. Both directions run at once, compressed.\n"
     "\n"
     "  --line PATH   serial device (default " DEFAULT_LINE ", or $W98LINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --bytes N     bytes to stream (default 200000)\n"
-    "  --window N    frames in flight, 1-32 (default 16)\n";
+    "  --window N    frames in flight, 1-32 (default 16)\n"
+    "  --file PATH   stream this file instead of incompressible test data,\n"
+    "                to measure real compression\n";
 
 /* The topic shown when a command fails, so the help next to an error is
  * about the command that was being run. */
@@ -155,19 +158,52 @@ static int cmd_echo(int argc, char **argv)
     return st.echoed == count ? 0 : 1;
 }
 
+/* Reads a whole file into a new buffer, or reports why not and returns NULL. */
+static uint8_t *read_file(const char *path, size_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    uint8_t *data = NULL;
+    long len = -1;
+
+    *len_out = 0;
+    if (f == NULL) {
+        fprintf(stderr, "w98link: cannot open %s: %s\n", path, strerror(errno));
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) == 0)
+        len = ftell(f);
+    if (len > 0 && fseek(f, 0, SEEK_SET) == 0)
+        data = malloc((size_t)len);
+    if (data != NULL && fread(data, 1, (size_t)len, f) != (size_t)len) {
+        free(data);
+        data = NULL;
+    }
+    (void)fclose(f);
+    if (data == NULL) {
+        fprintf(stderr, "w98link: cannot read %s: %s\n", path,
+                len == 0 ? "empty file" : strerror(errno));
+        return NULL;
+    }
+    *len_out = (size_t)len;
+    return data;
+}
+
 static int cmd_linktest(int argc, char **argv)
 {
     const char *line = getenv("W98LINK_LINE");
     const char *baud_s = NULL;
     const char *bytes_s = NULL;
     const char *window_s = NULL;
+    const char *file = NULL;
     struct opt opts[] = {
-        {"--line", &line}, {"--baud", &baud_s}, {"--bytes", &bytes_s}, {"--window", &window_s},
+        {"--line", &line},       {"--baud", &baud_s}, {"--bytes", &bytes_s},
+        {"--window", &window_s}, {"--file", &file},
     };
+    uint8_t *data = NULL;
     uint32_t baud = DEFAULT_BAUD;
     uint32_t bytes = 200000;
     uint32_t window = WL_LINK_DEFAULT_WINDOW;
-    struct wl_link_cfg cfg;
+    struct wl_session_cfg cfg;
     struct wl_linktest_result r;
     struct wl_transport t;
     wl_status s;
@@ -182,20 +218,35 @@ static int cmd_linktest(int argc, char **argv)
         return 1;
     if (window == 0)
         return usage_error("window must be at least", "1");
+    if (file != NULL) {
+        size_t len;
 
-    cfg.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.window = (uint8_t)window;
-    cfg.bytes_per_sec = baud / 10U;
+        data = read_file(file, &len);
+        if (data == NULL)
+            return 1;
+        if (len > 100000000U) {
+            free(data);
+            return usage_error("file too large for linktest", file);
+        }
+        bytes = (uint32_t)len;
+    }
+
+    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
+    cfg.link.window = (uint8_t)window;
+    cfg.link.bytes_per_sec = baud / 10U;
+    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     if (wl_serial_open(line, baud, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
+        free(data);
         return 1;
     }
     /* Allow for the link to come up plus the transfer at a pessimistic
      * quarter of the line rate. */
-    s = wl_linktest_probe(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), bytes,
-                          10000U + (uint32_t)((uint64_t)bytes * 4000U / cfg.bytes_per_sec),
+    s = wl_linktest_probe(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), data, bytes,
+                          10000U + (uint32_t)((uint64_t)bytes * 4000U / cfg.link.bytes_per_sec),
                           &r);
     wl_transport_close(&t);
+    free(data);
     if (s != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         return 1;
@@ -208,6 +259,10 @@ static int cmd_linktest(int argc, char **argv)
            (unsigned)r.stats.timeouts, (unsigned)r.stats.fast_retx,
            (unsigned)r.stats.rx.frames, (unsigned)r.stats.rx.crc,
            (unsigned)r.stats.rx.malformed);
+    if (r.zstats.z_out > 0)
+        printf("compression: %llu -> %llu bytes (%.2fx)\n",
+               (unsigned long long)r.zstats.plain_out, (unsigned long long)r.zstats.z_out,
+               (double)r.zstats.plain_out / (double)r.zstats.z_out);
     if (r.elapsed_ms > 0)
         printf("%.1f s, %.0f bytes/s each way, rto %u ms\n", (double)r.elapsed_ms / 1000.0,
                (double)r.bytes * 1000.0 / (double)r.elapsed_ms, (unsigned)r.stats.rto_ms);

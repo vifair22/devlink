@@ -7,6 +7,7 @@
 
 #include <cmocka.h>
 
+#include "sim_line.h"
 #include "w98link/link.h"
 
 /*
@@ -16,24 +17,6 @@
  * the other and checks every byte it receives, so any loss, duplication,
  * reordering or corruption that gets past the link fails the test.
  */
-
-#define CHAN_CAP (1U << 18)
-
-struct chan {
-    uint8_t byte[CHAN_CAP];
-    uint64_t at_us[CHAN_CAP];
-    size_t head;
-    size_t len;
-    uint64_t busy_until_us;
-};
-
-struct line {
-    uint32_t bytes_per_sec; /* 0: infinitely fast */
-    uint32_t latency_us;
-    uint32_t drop_ppm;    /* per byte */
-    uint32_t flip_ppm;    /* per byte, one random bit */
-    uint32_t garbage_ppm; /* per byte, inserts one random byte after it */
-};
 
 struct side {
     struct wl_link *l;
@@ -47,28 +30,13 @@ struct side {
 };
 
 struct sim {
-    struct line line;
-    struct chan ab; /* A -> B */
-    struct chan ba; /* B -> A */
+    struct sim_world w;
     struct side a;
     struct side b;
-    uint64_t now_us;
-    uint64_t rng;
     uint64_t corrupt_bytes; /* stream bytes that arrived wrong */
 };
 
 static struct sim sim;
-
-static uint32_t rnd(void)
-{
-    uint64_t x = sim.rng;
-
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    sim.rng = x;
-    return (uint32_t)(x >> 32);
-}
 
 static uint8_t stream_byte(int id, uint64_t k)
 {
@@ -82,56 +50,7 @@ static uint8_t stream_byte(int id, uint64_t k)
 
 static uint32_t now_ms(void)
 {
-    return (uint32_t)(sim.now_us / 1000U);
-}
-
-static void chan_push_byte(struct chan *c, uint8_t b)
-{
-    uint64_t start = c->busy_until_us > sim.now_us ? c->busy_until_us : sim.now_us;
-    uint64_t byte_us = sim.line.bytes_per_sec ? 1000000U / sim.line.bytes_per_sec : 0;
-    size_t tail;
-
-    assert_true(c->len < CHAN_CAP);
-    c->busy_until_us = start + byte_us;
-    tail = (c->head + c->len) % CHAN_CAP;
-    c->byte[tail] = b;
-    c->at_us[tail] = c->busy_until_us + sim.line.latency_us;
-    c->len++;
-}
-
-/* Bytes sent to a side that is not running still occupy the wire. */
-static void chan_send(struct chan *c, const uint8_t *p, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        uint8_t b = p[i];
-
-        if (sim.line.drop_ppm && rnd() % 1000000U < sim.line.drop_ppm)
-            continue;
-        if (sim.line.flip_ppm && rnd() % 1000000U < sim.line.flip_ppm)
-            b ^= (uint8_t)(1U << (rnd() % 8U));
-        chan_push_byte(c, b);
-        if (sim.line.garbage_ppm && rnd() % 1000000U < sim.line.garbage_ppm)
-            chan_push_byte(c, (uint8_t)rnd());
-    }
-}
-
-static void chan_deliver(struct chan *c, struct side *to)
-{
-    uint8_t buf[4096];
-    size_t n = 0;
-
-    while (c->len > 0 && c->at_us[c->head] <= sim.now_us && n < sizeof(buf)) {
-        buf[n++] = c->byte[c->head];
-        c->head = (c->head + 1) % CHAN_CAP;
-        c->len--;
-    }
-    if (n > 0 && to->running)
-        wl_link_rx(to->l, buf, n, now_ms());
-}
-
-static uint64_t chan_next_us(const struct chan *c)
-{
-    return c->len > 0 ? c->at_us[c->head] : UINT64_MAX;
+    return sim_now_ms(&sim.w);
 }
 
 static void side_app(struct side *s, int peer_id)
@@ -167,17 +86,6 @@ static void side_app(struct side *s, int peer_id)
     }
 }
 
-static void side_tx(struct side *s, struct chan *c)
-{
-    uint8_t wire[WL_FRAME_MAX_WIRE];
-    size_t n;
-
-    if (!s->running)
-        return;
-    while ((n = wl_link_poll_tx(s->l, wire, sizeof(wire), now_ms())) > 0)
-        chan_send(c, wire, n);
-}
-
 static int both_done(void)
 {
     return sim.a.recvd >= sim.b.total && sim.b.recvd >= sim.a.total &&
@@ -187,37 +95,20 @@ static int both_done(void)
 /* Advances virtual time until cond() holds or limit_ms passes. */
 static int run_until(int (*cond)(void), uint32_t limit_ms)
 {
-    uint64_t end = sim.now_us + (uint64_t)limit_ms * 1000U;
+    uint64_t end = sim.w.now_us + ((uint64_t)limit_ms * 1000U);
 
-    while (sim.now_us < end) {
-        uint64_t next;
-        uint32_t to = 1000;
-
+    while (sim.w.now_us < end) {
         side_app(&sim.a, sim.b.id);
         side_app(&sim.b, sim.a.id);
-        side_tx(&sim.a, &sim.ab);
-        side_tx(&sim.b, &sim.ba);
+        if (sim.a.running)
+            sim_tx(&sim.w, sim.a.l, &sim.w.ab);
+        if (sim.b.running)
+            sim_tx(&sim.w, sim.b.l, &sim.w.ba);
         if (cond())
             return 1;
-
-        if (sim.a.running) {
-            uint32_t t = wl_link_next_timeout(sim.a.l, now_ms());
-            to = t < to ? t : to;
-        }
-        if (sim.b.running) {
-            uint32_t t = wl_link_next_timeout(sim.b.l, now_ms());
-            to = t < to ? t : to;
-        }
-        next = (uint64_t)(now_ms() + to) * 1000U;
-        if (chan_next_us(&sim.ab) < next)
-            next = chan_next_us(&sim.ab);
-        if (chan_next_us(&sim.ba) < next)
-            next = chan_next_us(&sim.ba);
-        /* Always move forward, even when a timer is due right now. */
-        sim.now_us = next > sim.now_us ? next : sim.now_us + 100U;
-
-        chan_deliver(&sim.ab, &sim.b);
-        chan_deliver(&sim.ba, &sim.a);
+        sim_advance(&sim.w, sim.a.l, sim.a.running, sim.b.l, sim.b.running);
+        sim_deliver(&sim.w, &sim.w.ab, sim.b.l, sim.b.running);
+        sim_deliver(&sim.w, &sim.w.ba, sim.a.l, sim.a.running);
     }
     return cond();
 }
@@ -229,18 +120,16 @@ static struct wl_link *make_link(uint32_t seed, uint16_t max_payload, uint8_t wi
 
     cfg.max_payload = max_payload;
     cfg.window = window;
-    cfg.bytes_per_sec = sim.line.bytes_per_sec;
+    cfg.bytes_per_sec = sim.w.line.bytes_per_sec;
     l = wl_link_new(&cfg, seed, now_ms());
     assert_non_null(l);
     return l;
 }
 
-static void sim_init(const struct line *line, uint64_t total_each_way)
+static void sim_init(const struct sim_line_cfg *line, uint64_t total_each_way)
 {
     memset(&sim, 0, sizeof(sim));
-    sim.line = *line;
-    sim.rng = 0x2545F4914F6CDD1DULL;
-    sim.now_us = 1000000U;
+    sim_init_world(&sim.w, line);
     sim.a.id = 1;
     sim.b.id = 2;
     sim.a.total = sim.b.total = total_each_way;
@@ -261,7 +150,7 @@ static int both_up(void)
     return wl_link_is_up(sim.a.l) && wl_link_is_up(sim.b.l);
 }
 
-static const struct line serial_115200 = {11520, 2000, 0, 0, 0};
+static const struct sim_line_cfg serial_115200 = {11520, 2000, 0, 0, 0};
 
 /* ---------------------------------------------------------------------------
  * tests
@@ -277,9 +166,9 @@ static void test_clean_line_runs_near_line_rate(void **state)
     (void)state;
     sim_init(&serial_115200, 200000);
     assert_true(run_until(both_up, 2000));
-    start = sim.now_us;
+    start = sim.w.now_us;
     assert_true(run_until(both_done, 120000));
-    secs = (double)(sim.now_us - start) / 1e6;
+    secs = (double)(sim.w.now_us - start) / 1e6;
     rate = (double)sim.a.total / secs;
 
     assert_int_equal(sim.corrupt_bytes, 0);
@@ -294,7 +183,7 @@ static void test_clean_line_runs_near_line_rate(void **state)
 
 static void test_noisy_line_never_corrupts(void **state)
 {
-    static const struct line noisy = {11520, 2000, 200, 200, 100};
+    static const struct sim_line_cfg noisy = {11520, 2000, 200, 200, 100};
     struct wl_link_stats st;
 
     (void)state;
@@ -316,7 +205,7 @@ static void test_noisy_line_never_corrupts(void **state)
  * which no retransmission scheme fixes; smaller frames would.) */
 static void test_very_bad_line_still_delivers(void **state)
 {
-    static const struct line awful = {11520, 20000, 500, 300, 200};
+    static const struct sim_line_cfg awful = {11520, 20000, 500, 300, 200};
 
     (void)state;
     sim_init(&awful, 30000);
@@ -329,7 +218,7 @@ static void test_very_bad_line_still_delivers(void **state)
  * with a tiny payload to wrap the 16-bit sequence numbers several times. */
 static void test_sequence_numbers_wrap(void **state)
 {
-    static const struct line fast = {0, 500, 0, 0, 0};
+    static const struct sim_line_cfg fast = {0, 500, 0, 0, 0};
 
     (void)state;
     sim_init(&fast, 0);

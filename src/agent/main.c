@@ -64,7 +64,7 @@ static int cmd_linktest(int argc, char **argv)
     const char *port = argc > 0 ? argv[0] : "COM1";
     unsigned long baud = argc > 1 ? strtoul(argv[1], NULL, 10) : 115200UL;
     unsigned long wait = argc > 2 ? strtoul(argv[2], NULL, 10) : 120UL;
-    struct wl_link_cfg cfg;
+    struct wl_session_cfg cfg;
     struct wl_linktest_result r;
     struct wl_transport t;
     wl_status s;
@@ -73,9 +73,10 @@ static int cmd_linktest(int argc, char **argv)
         fputs(help, stderr);
         return 1;
     }
-    cfg.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.window = WL_LINK_DEFAULT_WINDOW;
-    cfg.bytes_per_sec = (uint32_t)(baud / 10UL);
+    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
+    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    cfg.link.bytes_per_sec = (uint32_t)(baud / 10UL);
+    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
         fprintf(stderr, "W98AGENT: %s\n", wl_error());
         return 1;

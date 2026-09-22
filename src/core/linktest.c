@@ -1,7 +1,6 @@
 #include <string.h>
 
 #include "w98link/clock.h"
-#include "w98link/link_io.h"
 #include "w98link/linktest.h"
 
 #define PUMP_MS 50U
@@ -13,28 +12,33 @@ static uint8_t pattern(uint64_t k)
     return (uint8_t)((x >> 24) ^ (uint32_t)(k >> 8));
 }
 
-wl_status wl_linktest_probe(struct wl_transport *t, const struct wl_link_cfg *cfg,
-                            uint32_t seed, uint64_t total, uint32_t limit_ms,
-                            struct wl_linktest_result *out)
+static uint8_t source_byte(const uint8_t *data, uint64_t k)
 {
-    struct wl_link *l = wl_link_new(cfg, seed, wl_clock_ms());
+    return data != NULL ? data[k] : pattern(k);
+}
+
+wl_status wl_linktest_probe(struct wl_transport *t, const struct wl_session_cfg *cfg,
+                            uint32_t seed, const uint8_t *data, uint64_t total,
+                            uint32_t limit_ms, struct wl_linktest_result *out)
+{
+    struct wl_session *s = wl_session_new(cfg, seed, wl_clock_ms());
     uint8_t buf[1024];
     uint64_t sent = 0;
     uint32_t start = wl_clock_ms();
     uint32_t up_at = 0;
     uint32_t gen = 0;
-    wl_status s = WL_OK;
+    wl_status st = WL_OK;
 
     memset(out, 0, sizeof(*out));
-    if (l == NULL)
+    if (s == NULL)
         return WL_ERR_NOMEM;
     while (out->bytes < total && wl_clock_since(start) < limit_ms) {
-        s = wl_link_pump(l, t, PUMP_MS);
-        if (s != WL_OK)
+        st = wl_session_pump(s, t, PUMP_MS);
+        if (st != WL_OK)
             break;
-        if (wl_link_generation(l) != gen) {
+        if (wl_session_generation(s) != gen) {
             /* A new session restarts the stream from byte 0 on both ends. */
-            gen = wl_link_generation(l);
+            gen = wl_session_generation(s);
             out->sessions++;
             sent = 0;
             out->bytes = 0;
@@ -44,56 +48,61 @@ wl_status wl_linktest_probe(struct wl_transport *t, const struct wl_link_cfg *cf
             size_t want = total - sent < sizeof(buf) ? (size_t)(total - sent) : sizeof(buf);
             size_t n;
 
-            for (size_t i = 0; i < want; i++)
-                buf[i] = pattern(sent + i);
-            n = wl_link_send(l, buf, want);
+            if (data != NULL) {
+                n = wl_session_send(s, data + sent, want);
+            } else {
+                for (size_t i = 0; i < want; i++)
+                    buf[i] = pattern(sent + i);
+                n = wl_session_send(s, buf, want);
+            }
             sent += n;
             if (n < want)
                 break;
         }
         for (;;) {
-            size_t n = wl_link_recv(l, buf, sizeof(buf));
+            size_t n = wl_session_recv(s, buf, sizeof(buf));
 
             if (n == 0)
                 break;
             for (size_t i = 0; i < n; i++) {
-                if (buf[i] != pattern(out->bytes + i))
+                if (out->bytes + i >= total || buf[i] != source_byte(data, out->bytes + i))
                     out->corrupt++;
             }
             out->bytes += n;
         }
     }
     out->elapsed_ms = up_at != 0 ? wl_clock_since(up_at) : 0;
-    wl_link_get_stats(l, &out->stats);
-    wl_link_free(l);
-    return s;
+    wl_link_get_stats(wl_session_link(s), &out->stats);
+    wl_session_get_stats(s, &out->zstats);
+    wl_session_free(s);
+    return st;
 }
 
-wl_status wl_linktest_serve(struct wl_transport *t, const struct wl_link_cfg *cfg,
+wl_status wl_linktest_serve(struct wl_transport *t, const struct wl_session_cfg *cfg,
                             uint32_t seed, uint32_t wait_ms, uint32_t idle_ms,
                             struct wl_linktest_result *out)
 {
-    struct wl_link *l = wl_link_new(cfg, seed, wl_clock_ms());
-    uint8_t buf[1024];
-    size_t pending = 0; /* received but not yet accepted by wl_link_send */
+    struct wl_session *s = wl_session_new(cfg, seed, wl_clock_ms());
+    uint8_t buf[4096];
+    size_t pending = 0; /* received but not yet accepted by wl_session_send */
     uint32_t start = wl_clock_ms();
     uint32_t last_data = 0;
     uint32_t gen = 0;
-    wl_status s = WL_OK;
+    wl_status st = WL_OK;
 
     memset(out, 0, sizeof(*out));
-    if (l == NULL)
+    if (s == NULL)
         return WL_ERR_NOMEM;
     for (;;) {
         if (out->bytes == 0 && wl_clock_since(start) >= wait_ms)
             break;
         if (out->bytes > 0 && wl_clock_since(last_data) >= idle_ms)
             break;
-        s = wl_link_pump(l, t, PUMP_MS);
-        if (s != WL_OK)
+        st = wl_session_pump(s, t, PUMP_MS);
+        if (st != WL_OK)
             break;
-        if (wl_link_generation(l) != gen) {
-            gen = wl_link_generation(l);
+        if (wl_session_generation(s) != gen) {
+            gen = wl_session_generation(s);
             out->sessions++;
             pending = 0;
         }
@@ -101,13 +110,13 @@ wl_status wl_linktest_serve(struct wl_transport *t, const struct wl_link_cfg *cf
             size_t n;
 
             if (pending > 0) {
-                n = wl_link_send(l, buf, pending);
+                n = wl_session_send(s, buf, pending);
                 memmove(buf, buf + n, pending - n);
                 pending -= n;
                 if (pending > 0)
                     break; /* peer is not draining; let the window move */
             }
-            n = wl_link_recv(l, buf, sizeof(buf));
+            n = wl_session_recv(s, buf, sizeof(buf));
             if (n == 0)
                 break;
             out->bytes += n;
@@ -116,7 +125,8 @@ wl_status wl_linktest_serve(struct wl_transport *t, const struct wl_link_cfg *cf
         }
     }
     out->elapsed_ms = wl_clock_since(start);
-    wl_link_get_stats(l, &out->stats);
-    wl_link_free(l);
-    return s;
+    wl_link_get_stats(wl_session_link(s), &out->stats);
+    wl_session_get_stats(s, &out->zstats);
+    wl_session_free(s);
+    return st;
 }

@@ -1,6 +1,7 @@
 # w98link protocol, version 1
 
-Status: draft for review (iteration 1). Nothing here is implemented yet.
+Status: agreed in iteration 1. Implemented so far: serial framing, link and
+compression layers (iterations 2-5).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
@@ -168,8 +169,9 @@ comes from.
   transfers efficient and interactive output prompt.
 - The compressed bytes are cut into link frames of up to `max_payload`. Frame
   boundaries have no relation to record boundaries.
-- Default level 6. The level is a local choice and needs no negotiation;
-  deflate output is decodable at any level.
+- Default level 9 on serial, where CPU is free next to an 11 KB/s line; TCP
+  will want a lower one. The level is a local choice and needs no
+  negotiation; deflate output is decodable at any level.
 - Data that is already compressed (zip, jpeg and the like) costs CPU for no
   gain. v1 accepts that: a Pentium III compresses far faster than the serial
   line can carry the result. Per-channel level switching is a later
