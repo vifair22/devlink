@@ -1,0 +1,7 @@
+# Everything a build produces lands under build/, one subdirectory per
+# variant, so a single rule covers it.
+build/
+*.su
+*.gcda
+*.gcno
+__pycache__/

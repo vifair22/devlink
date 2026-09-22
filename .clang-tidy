@@ -1,0 +1,119 @@
+# clang-tidy configuration for ascii-check.
+#
+# The enabled set is the checks that find real defects in C: the static
+# analyser, the bugprone family, CERT's security rules, and the performance
+# and portability groups. Everything switched off below is off for a stated
+# reason rather than because it was noisy once.
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  performance-*,
+  portability-*,
+  readability-*,
+
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -readability-braces-around-statements,
+  -readability-isolate-declaration,
+  -readability-avoid-nested-conditional-operator,
+  -bugprone-easily-swappable-parameters,
+  -misc-no-recursion,
+  -cert-err33-c,
+  -bugprone-suspicious-realloc-usage,
+  -misc-include-cleaner,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -readability-implicit-bool-conversion,
+  -readability-trailing-comma,
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(include|src)/.*\.h$'
+FormatStyle: none
+
+CheckOptions:
+  # Codepoints and byte values are clearer in hex.
+  - key: readability-uppercase-literal-suffix.NewSuffixes
+    value: 'L;U;LL;ULL'
+  - key: readability-else-after-return.WarnOnConditionVariables
+    value: 'false'
+  # Keeps the check for genuinely signed operands, which is the defect it
+  # exists to catch, while allowing the positive literals that make up every
+  # instance here. See the note below.
+  - key: bugprone-signed-bitwise.IgnorePositiveIntegerLiterals
+    value: 'true'
+
+# Why each exclusion:
+#
+# readability-magic-numbers
+#   UTF-8 is defined in terms of specific byte patterns (0xC0, 0x80, 0x1F).
+#   Naming each one would obscure the encoding rather than explain it.
+#
+# readability-identifier-length
+#   Short names are idiomatic in C for tight scopes: `p` and `n` in a scan
+#   loop read better than `current_pointer` and `sequence_length`.
+#
+# readability-function-cognitive-complexity
+#   The argument parser and the scan loop are branchy by nature. Splitting
+#   them to satisfy a metric would spread one coherent decision across
+#   several functions.
+#
+# readability-braces-around-statements, readability-isolate-declaration
+#   Style, not correctness, and the codebase is already consistent.
+#
+# bugprone-easily-swappable-parameters
+#   Fires on every (buffer, length) pair, which is most of this API.
+#
+# misc-no-recursion
+#   walk_plain is recursive by design; its depth is bounded explicitly and
+#   its stack cost is checked by `make analyze`.
+#
+# cert-err33-c
+#   Demands checking the return of every printf. Output to a report stream
+#   that has already failed has nothing useful to do about it.
+#
+# bugprone-suspicious-realloc-usage
+#   Fires on the grow-by-doubling idiom used by every dynamic array here.
+#   Each one assigns through a temporary and frees on failure, which is the
+#   pattern the check exists to encourage.
+#
+# misc-include-cleaner
+#   Wants every symbol's defining header included directly, even when a
+#   project header already provides it by design. error.h exists precisely so
+#   a caller gets ac_status and the setters together; satisfying the check
+#   would mean pasting ascii_check.h into every file and defeating the
+#   layering.
+#
+# clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+#   Demands the C11 Annex K functions (snprintf_s, memset_s). Annex K is
+#   optional, glibc does not implement it, and every bounded call here
+#   already passes an explicit size and checks the result.
+#
+# bugprone-multi-level-implicit-pointer-conversion
+#   Fires on passing a char ** to free() and on assigning realloc's void *
+#   back. Implicit conversion to and from void * is how C is written; the
+#   check is aimed at C++.
+#
+# readability-implicit-bool-conversion
+#   C has no native bool, and testing an int for truth or returning a bool
+#   where a status is expected is ordinary C. Satisfying the check would mean
+#   sprinkling "!= 0" and "? 1 : 0" through code that is already clear.
+#
+# readability-trailing-comma
+#   Added to clang-tidy after this config was written and swept in by the
+#   readability-* glob, so it appeared as 174 new errors on the first machine
+#   with a newer LLVM (23.1.1 via Homebrew) rather than through any change to
+#   the code. It demands a trailing comma on the last enumerator and the last
+#   initializer. Pure layout, and the codebase is already consistent without
+#   it.
+#
+# bugprone-signed-bitwise.IgnorePositiveIntegerLiterals
+#   Not an exclusion: the check stays on. Every instance it flagged here is an
+#   unsigned value against a positive literal -- `b0 & 0xE0` in the UTF-8
+#   decoder, `1 << 16` as a capacity, `key >> 32` in the report hash. The
+#   literal is an int because that is what C makes an unquoted constant; none
+#   of them can be negative. The option narrows the check to operands that
+#   really are signed, which is the case worth failing a build over.
