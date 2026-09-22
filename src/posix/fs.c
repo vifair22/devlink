@@ -159,3 +159,31 @@ int wl_fs_drive_ready(char letter)
     (void)letter;
     return 1;
 }
+
+wl_status wl_fs_list(const char *path, wl_fs_list_cb cb, void *ctx)
+{
+    DIR *d = opendir(path);
+    struct dirent *e;
+    wl_status st = WL_OK;
+
+    if (d == NULL)
+        return wl_fail(WL_ERR_IO, "cannot list %s: %s", path, strerror(errno));
+    while ((e = readdir(d)) != NULL) {
+        char full[WL_PATH_MAX];
+        struct stat sb;
+
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (!wl_fs_join(full, sizeof(full), path, e->d_name)) {
+            st = wl_fail(WL_ERR_NOSPACE, "path too long under %s", path);
+            break;
+        }
+        if (stat(full, &sb) != 0)
+            continue; /* vanished between readdir and stat; not this call's problem */
+        if (!cb(ctx, e->d_name, S_ISDIR(sb.st_mode) ? 1 : 0,
+                S_ISDIR(sb.st_mode) ? 0 : (uint64_t)sb.st_size, (uint64_t)sb.st_mtime))
+            break;
+    }
+    (void)closedir(d);
+    return st;
+}

@@ -292,9 +292,29 @@ STDIN is carried from v1 so that the v2 interactive shell needs no protocol
 change. A v1 client simply sends STDIN_EOF straight away.
 
 A command starting with `@` addresses the agent itself rather than the shell.
-The only one in v1 is `@stop`, which makes the agent reply with exit status 0
-and then exit, so its launcher can put a newly uploaded binary in place and
-start it again. Unknown `@` commands are refused with OPEN_FAIL.
+Unknown `@` commands are refused with OPEN_FAIL. v1 has two:
+
+- `@stop` makes the agent reply with exit status 0 and then exit, so its
+  launcher can put a newly uploaded binary in place and start it again.
+- `@dir PATH` lists one directory, without recursing, as STDOUT records on the
+  same channel, then EXIT 0 and CLOSE. One entry per line:
+
+  ```
+  f 135168 1790116008 W98AGENT.EXE
+  d 0 1790103092 SRC
+  ```
+
+  A type (`f` or `d`), the size in bytes (0 for a directory), the mtime in the
+  same seconds-since-epoch the rest of the protocol uses, and the name, each
+  separated by one space. The name is the rest of the line, because it may
+  contain spaces; entries come in directory order, not sorted, and `.` and
+  `..` are left out. A path that cannot be listed is refused with OPEN_FAIL
+  and code 256 rather than producing an empty listing.
+
+  This exists because the alternative on the target is `command.com`'s `dir`,
+  which reports 8.3 aliases instead of long names, formats dates by the
+  machine's locale, cannot return a real status, and costs a DOS virtual
+  machine (measured on the A21m: 182 ms against 97 ms for `@dir`).
 
 Implementation notes for the agent (not wire format), all measured on the
 Windows 98 SE target:

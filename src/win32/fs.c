@@ -223,3 +223,42 @@ int wl_fs_drive_ready(char letter)
      */
     return GetDiskFreeSpaceA(root, &spc, &bps, &freec, &totalc) ? 1 : 0;
 }
+
+wl_status wl_fs_list(const char *path, wl_fs_list_cb cb, void *ctx)
+{
+    char pattern[WL_PATH_MAX + 4];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    size_t n = strlen(path);
+    int stop = 0;
+
+    if (n == 0 || n + 3 >= sizeof(pattern))
+        return wl_fail(WL_ERR_NOSPACE, "path too long: %s", path);
+    memcpy(pattern, path, n);
+    while (n > 1 && (pattern[n - 1] == '\\' || pattern[n - 1] == '/'))
+        n--;
+    /* A bare drive root is "C:", where the separator is not optional. */
+    if (n == 2 && pattern[1] == ':')
+        pattern[n++] = '\\';
+    else
+        pattern[n++] = '\\';
+    pattern[n++] = '*';
+    pattern[n] = '\0';
+    h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return wl_fail(WL_ERR_IO, "cannot list %s (%lu)", path, GetLastError());
+    do {
+        uint64_t size;
+
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+            continue;
+        size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            size = 0;
+        if (!cb(ctx, fd.cFileName, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+                size, ft_to_unix(&fd.ftLastWriteTime)))
+            stop = 1;
+    } while (!stop && FindNextFileA(h, &fd));
+    FindClose(h);
+    return WL_OK;
+}

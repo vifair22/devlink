@@ -217,8 +217,34 @@ up, Windows 98 freezes the agent itself, so the cancel is not read until
 somebody answers the prompt at the target's keyboard. See section 10.
 
 **Agent commands:** a command starting with `@` addresses the agent itself
-rather than the shell. `@stop` is the only one: the agent replies with exit
-status 0 and exits, so its launcher can restart it.
+rather than the shell. There are two.
+
+`@stop` makes the agent exit with status 0, so its launcher can put a newly
+uploaded binary in place and start it again. This is how the agent is updated;
+see section 3.
+
+`@dir PATH` lists one directory. It is handled inside the agent, so unlike
+`dir` it never starts a DOS virtual machine, and it reports what is actually on
+disk:
+
+```
+$ w98link exec '@dir C:\W98AGENT'
+f 135168 1790116008 W98AGENT.EXE
+f 423 1790103092 AGENT.BAT
+```
+
+Type (`f` file, `d` directory), size in bytes (0 for a directory), mtime as
+seconds since 1970-01-01 UTC, then the name, one space between each. The name
+is the rest of the line, so a name containing spaces needs no quoting on this
+side; split the line three times and stop. Entries are in directory order, not
+sorted, and `.` and `..` are left out. A path that cannot be listed fails with
+status 125 and a message rather than printing nothing.
+
+Compared with `dir` on the same directory: long names instead of 8.3 aliases,
+exact byte sizes, a machine-readable time instead of a locale-formatted one, a
+real exit status, no volume header or free-space footer, and about half the
+time (97 ms against 182 ms on the A21m). Use `dir` when you want the DOS
+report; use `@dir` when something on this side has to read it.
 
 ### put and get
 

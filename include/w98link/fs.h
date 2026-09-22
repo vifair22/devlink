@@ -60,4 +60,17 @@ wl_status wl_fs_walk(const char *root, int include_hidden, wl_fs_walk_cb cb, voi
  */
 int wl_fs_drive_ready(char letter);
 
+/*
+ * Lists one directory, without recursing, calling back for each entry other
+ * than "." and "..". Directories are reported too, with size 0. Names are as
+ * stored: on Win32 that is the long name, not the 8.3 alias that a DOS `dir`
+ * prints.
+ *
+ * The callback returns 0 to stop the listing.
+ */
+typedef int (*wl_fs_list_cb)(void *ctx, const char *name, int is_dir, uint64_t size,
+                             uint64_t mtime);
+
+wl_status wl_fs_list(const char *path, wl_fs_list_cb cb, void *ctx);
+
 #endif

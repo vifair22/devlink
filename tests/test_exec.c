@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cmocka.h>
@@ -392,6 +393,102 @@ static void test_ready_drives_and_colons_are_not_refused(void **state)
     assert_int_equal(r.exit_code, 0);
 }
 
+/* @dir is handled inside the agent, so the listing must carry what DOS cannot
+ * report: names as stored, exact sizes, a real status. */
+static void test_agent_dir_lists_a_directory(void **state)
+{
+    char dir[] = "/tmp/w98link-dir-XXXXXX";
+    struct wl_exec_result r;
+    char cmd[128];
+    char path[128];
+    FILE *f;
+
+    (void)state;
+    assert_non_null(mkdtemp(dir));
+    sprintf(path, "%s/a long name.txt", dir);
+    f = fopen(path, "wb");
+    assert_non_null(f);
+    assert_int_equal(fwrite("12345", 1, 5, f), 5);
+    (void)fclose(f);
+    sprintf(path, "%s/sub", dir);
+    assert_int_equal(mkdir(path, 0700), 0);
+
+    sprintf(cmd, "@dir %s", dir);
+    assert_int_equal(run(cmd, NULL, 0, &r), WL_OK);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+    cap.out[cap.out_len] = '\0';
+    /* One line each, the name last because it contains spaces. */
+    assert_non_null(strstr(cap.out, "f 5 "));
+    assert_non_null(strstr(cap.out, " a long name.txt\n"));
+    assert_non_null(strstr(cap.out, "d 0 "));
+    assert_non_null(strstr(cap.out, " sub\n"));
+    assert_int_equal(cap.err_len, 0);
+
+    sprintf(path, "%s/a long name.txt", dir);
+    (void)remove(path);
+    sprintf(path, "%s/sub", dir);
+    (void)remove(path);
+    (void)remove(dir);
+}
+
+/* Output longer than one mux chunk has to arrive whole: the listing goes
+ * through the same flow control as a command's output. */
+static void test_agent_dir_handles_a_big_directory(void **state)
+{
+    char dir[] = "/tmp/w98link-big-XXXXXX";
+    struct wl_exec_result r;
+    char cmd[128];
+    char path[160];
+    size_t lines = 0;
+
+    (void)state;
+    assert_non_null(mkdtemp(dir));
+    for (int i = 0; i < 400; i++) {
+        FILE *f;
+
+        sprintf(path, "%s/file-%03d-with-a-longish-name.dat", dir, i);
+        f = fopen(path, "wb");
+        assert_non_null(f);
+        (void)fclose(f);
+    }
+    sprintf(cmd, "@dir %s", dir);
+    assert_int_equal(run(cmd, NULL, 0, &r), WL_OK);
+    assert_int_equal(r.exit_code, 0);
+    for (size_t i = 0; i < cap.out_len; i++) {
+        if (cap.out[i] == '\n')
+            lines++;
+    }
+    assert_int_equal(lines, 400);
+    assert_true(cap.out_len > 4096); /* past one OUT_CHUNK, so it was streamed */
+    for (int i = 0; i < 400; i++) {
+        sprintf(path, "%s/file-%03d-with-a-longish-name.dat", dir, i);
+        (void)remove(path);
+    }
+    (void)remove(dir);
+}
+
+static void test_agent_dir_failures(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("@dir /nonexistent/place", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_NOT_FOUND);
+
+    assert_int_equal(run("@dir", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_PATH);
+
+    /* The drive guard applies here too: an agent command must not be a way
+     * around it. */
+    assert_int_equal(run("@dir D:\\", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_NOT_FOUND);
+    assert_string_equal(r.message, "drive D: is not ready");
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -413,6 +510,10 @@ int main(void)
                                         teardown),
         cmocka_unit_test_setup_teardown(test_ready_drives_and_colons_are_not_refused, setup,
                                         teardown),
+        cmocka_unit_test_setup_teardown(test_agent_dir_lists_a_directory, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_agent_dir_handles_a_big_directory, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_agent_dir_failures, setup, teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

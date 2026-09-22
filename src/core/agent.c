@@ -33,6 +33,12 @@ struct exec {
     uint8_t *stdin_q; /* client bytes the process has not taken yet */
     size_t stdin_len;
     int stdin_eof;
+    /* An agent command such as @dir produces its output here instead of from
+     * a process; proc is then NULL and the status is always 0. Everything
+     * below this point in the exec path is shared with a real command. */
+    char *out_buf;
+    size_t out_len;
+    size_t out_at;
 };
 
 /* One file transfer in progress. PUT writes to a temporary file beside the
@@ -178,6 +184,7 @@ static void end_exec(struct agent *a, struct exec *e)
             wl_proc_free(e->proc);
     }
     free(e->stdin_q);
+    free(e->out_buf);
     memset(e, 0, sizeof(*e));
 }
 
@@ -217,26 +224,6 @@ static void on_ready(void *ctx, const struct wl_hello *h)
     struct agent *a = ctx;
 
     log_line(a, "session: client ", h->build);
-}
-
-/* Commands beginning with '@' address the agent itself rather than the
- * shell (docs/protocol.md, "EXEC"). @stop exists so the agent can be
- * replaced: the launcher copies a new binary in and starts it again. */
-static void agent_command(struct agent *a, uint16_t ch, const char *cmd)
-{
-    uint8_t code[4];
-
-    if (strcmp(cmd, "@stop") != 0) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "unknown agent command");
-        return;
-    }
-    if (wl_peer_accept(a->peer, ch) != WL_OK)
-        return;
-    wl_put_u32le(code, 0);
-    (void)wl_peer_send(a->peer, ch, WL_EXEC_EXIT, code, sizeof(code));
-    (void)wl_peer_close(a->peer, ch);
-    a->stopping = 1;
-    log_line(a, "stopping at the client's request", "");
 }
 
 /*
@@ -289,6 +276,157 @@ static int drives_are_ready(struct agent *a, const char *cmd, char *bad)
     return 1;
 }
 
+/* Watcom's runtime is not asked to format 64-bit integers: this is smaller
+ * than pulling in that part of printf, and there is no doubt about whether
+ * the target's C library handles the conversion. */
+static size_t u64_dec(uint64_t v, char *out)
+{
+    char tmp[20];
+    size_t n = 0;
+    size_t i;
+
+    do {
+        tmp[n++] = (char)('0' + (unsigned)(v % 10U));
+        v /= 10U;
+    } while (v != 0);
+    for (i = 0; i < n; i++)
+        out[i] = tmp[n - 1 - i];
+    return n;
+}
+
+/* One @dir listing, grown a line at a time. */
+struct listing {
+    char *buf;
+    size_t len;
+    size_t cap;
+    int oom;
+};
+
+/*
+ * One entry per line: type, size, mtime, name, separated by single spaces,
+ * with the name last because it may contain them. Sizes are exact and names
+ * are as stored, which is the point of doing this here rather than in
+ * command.com: DOS reports 8.3 aliases and a locale-dependent date.
+ */
+static int listing_line(void *ctx, const char *name, int is_dir, uint64_t size,
+                        uint64_t mtime)
+{
+    struct listing *l = ctx;
+    char line[WL_PATH_MAX + 48];
+    size_t n = 0;
+    size_t name_n = strlen(name);
+
+    line[n++] = is_dir ? 'd' : 'f';
+    line[n++] = ' ';
+    n += u64_dec(size, line + n);
+    line[n++] = ' ';
+    n += u64_dec(mtime, line + n);
+    line[n++] = ' ';
+    if (name_n > WL_PATH_MAX)
+        name_n = WL_PATH_MAX;
+    /* Copied a character at a time rather than with memcpy because the result
+     * is deliberately not a string: the line is kept by length and ends with
+     * the newline below. */
+    for (size_t i = 0; i < name_n; i++)
+        line[n + i] = name[i];
+    n += name_n;
+    line[n++] = '\n';
+
+    if (l->len + n > l->cap) {
+        size_t want = l->cap == 0 ? 4096U : l->cap * 2U;
+        char *bigger;
+
+        while (want < l->len + n)
+            want *= 2U;
+        bigger = realloc(l->buf, want);
+        if (bigger == NULL) {
+            l->oom = 1;
+            return 0;
+        }
+        l->buf = bigger;
+        l->cap = want;
+    }
+    memcpy(l->buf + l->len, line, n);
+    l->len += n;
+    return 1;
+}
+
+/* Returns nonzero if the slot is now serving the listing. */
+static int agent_dir(struct agent *a, uint16_t ch, const char *path, struct exec *e)
+{
+    struct listing l;
+    char bad = '\0';
+    wl_status st;
+
+    if (path[0] == '\0') {
+        (void)wl_peer_reject(a->peer, ch, WL_E_PATH, "@dir needs a path");
+        return 0;
+    }
+    /* The same guard as a shell command gets: a listing of an empty drive
+     * must fail here rather than anywhere near DOS. */
+    if (!drives_are_ready(a, path, &bad)) {
+        char msg[64];
+
+        sprintf(msg, "drive %c: is not ready", bad);
+        (void)wl_peer_reject(a->peer, ch, WL_E_NOT_FOUND, msg);
+        return 0;
+    }
+    memset(&l, 0, sizeof(l));
+    st = wl_fs_list(path, listing_line, &l);
+    if (st != WL_OK || l.oom) {
+        free(l.buf);
+        (void)wl_peer_reject(a->peer, ch, l.oom ? WL_E_PROCESS : WL_E_NOT_FOUND,
+                             l.oom ? "agent out of memory" : wl_error());
+        return 0;
+    }
+    if (wl_peer_accept(a->peer, ch) != WL_OK) {
+        free(l.buf);
+        return 0;
+    }
+    /* Handed to the exec path, which already knows how to push output out a
+     * chunk at a time and finish with EXIT and CLOSE. */
+    e->active = 1;
+    e->ch = ch;
+    e->out_buf = l.buf;
+    e->out_len = l.len;
+    log_line(a, "dir: ", path);
+    return 1;
+}
+
+/*
+ * Commands beginning with '@' address the agent itself rather than the shell
+ * (docs/protocol.md, "EXEC"). @stop exists so the agent can be replaced: the
+ * launcher copies a new binary in and starts it again. @dir lists a directory
+ * without going near command.com, which is what makes it report long names,
+ * exact sizes and a real exit status.
+ *
+ * Returns nonzero if the exec slot is now in use.
+ */
+static int agent_command(struct agent *a, uint16_t ch, const char *cmd, struct exec *e)
+{
+    uint8_t code[4];
+
+    if (strncmp(cmd, "@dir", 4) == 0 && (cmd[4] == ' ' || cmd[4] == '\0')) {
+        const char *path = cmd + 4;
+
+        while (*path == ' ')
+            path++;
+        return agent_dir(a, ch, path, e);
+    }
+    if (strcmp(cmd, "@stop") != 0) {
+        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "unknown agent command");
+        return 0;
+    }
+    if (wl_peer_accept(a->peer, ch) != WL_OK)
+        return 0;
+    wl_put_u32le(code, 0);
+    (void)wl_peer_send(a->peer, ch, WL_EXEC_EXIT, code, sizeof(code));
+    (void)wl_peer_close(a->peer, ch);
+    a->stopping = 1;
+    log_line(a, "stopping at the client's request", "");
+    return 0;
+}
+
 static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
 {
     struct wl_rbuf r;
@@ -335,11 +473,12 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     cwd_z[cwd_n] = '\0';
 
     if (cmd_z[0] == '@') {
-        agent_command(a, ch, cmd_z);
+        if (!agent_command(a, ch, cmd_z, e)) {
+            free(e->stdin_q);
+            e->stdin_q = NULL;
+        }
         free(cmd_z);
         free(cwd_z);
-        free(e->stdin_q);
-        e->stdin_q = NULL;
         return;
     }
     {
@@ -1128,6 +1267,32 @@ static void on_error(void *ctx, uint16_t code, const char *msg, size_t n)
  * servicing running commands
  * ------------------------------------------------------------------------- */
 
+/*
+ * The next chunk of one output stream, from the process or, for an agent
+ * command such as @dir, from the buffer it left behind. Keeping both behind
+ * one call is what lets an agent command reuse the whole exec path: flow
+ * control, chunking, EXIT and CLOSE.
+ */
+static size_t exec_output(struct exec *e, int s, int stream, int *eof)
+{
+    size_t n;
+
+    if (e->proc != NULL)
+        return wl_proc_read(e->proc, stream, e->pend[s], OUT_CHUNK, eof);
+    if (s != 0) {
+        *eof = 1; /* an agent command has no stderr */
+        return 0;
+    }
+    n = e->out_len - e->out_at;
+    if (n > OUT_CHUNK)
+        n = OUT_CHUNK;
+    memcpy(e->pend[s], e->out_buf + e->out_at, n);
+    e->out_at += n;
+    if (e->out_at == e->out_len)
+        *eof = 1;
+    return n;
+}
+
 static void service_exec(struct agent *a, struct exec *e)
 {
     static const uint8_t types[2] = {WL_EXEC_STDOUT, WL_EXEC_STDERR};
@@ -1155,15 +1320,17 @@ static void service_exec(struct agent *a, struct exec *e)
         return;
     }
 
-    if (e->stdin_len > 0) {
-        size_t n = wl_proc_write(e->proc, e->stdin_q, e->stdin_len);
+    if (e->proc != NULL) {
+        if (e->stdin_len > 0) {
+            size_t n = wl_proc_write(e->proc, e->stdin_q, e->stdin_len);
 
-        memmove(e->stdin_q, e->stdin_q + n, e->stdin_len - n);
-        e->stdin_len -= n;
-    }
-    if (e->stdin_eof && e->stdin_len == 0) {
-        wl_proc_close_stdin(e->proc);
-        e->stdin_eof = 0;
+            memmove(e->stdin_q, e->stdin_q + n, e->stdin_len - n);
+            e->stdin_len -= n;
+        }
+        if (e->stdin_eof && e->stdin_len == 0) {
+            wl_proc_close_stdin(e->proc);
+            e->stdin_eof = 0;
+        }
     }
 
     for (int s = 0; s < 2; s++) {
@@ -1178,14 +1345,14 @@ static void service_exec(struct agent *a, struct exec *e)
             }
             if (e->eof[s])
                 break;
-            e->pend_len[s] = wl_proc_read(e->proc, streams[s], e->pend[s], OUT_CHUNK, &e->eof[s]);
+            e->pend_len[s] = exec_output(e, s, streams[s], &e->eof[s]);
             if (e->pend_len[s] == 0)
                 break;
         }
     }
 
     if (!e->exited)
-        e->exited = wl_proc_exited(e->proc, &e->code);
+        e->exited = e->proc != NULL ? wl_proc_exited(e->proc, &e->code) : 1;
     /* EXIT only after both streams are drained, so the client sees every
      * byte of output before the exit status. */
     if (e->exited && e->eof[0] && e->eof[1] && e->pend_len[0] == 0 && e->pend_len[1] == 0) {
