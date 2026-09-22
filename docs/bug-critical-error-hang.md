@@ -1,6 +1,6 @@
 # Bug: a critical-error prompt on the target hangs the whole agent
 
-Status: fixed, pending a check on the target (see the end). Found 2026-09-22 against agent `0.1.0_20260922.1801.win98`,
+Status: fixed and verified on the target; one item still open (see the end). Found 2026-09-22 against agent `0.1.0_20260922.1801.win98`,
 client `0.1.0_20260922.1623.release`, Windows 98 SE 4.10.2222 on the A21m.
 
 ## What happened
@@ -120,8 +120,54 @@ each step of `wl_proc_free`, will show where teardown stops.
   in `tests/test_exec.c` starts a long command, drops the client, and
   requires the next client to be served promptly.
 
-Still **UNVERIFIED** on the target, and the reason this stays open until
-tested there: whether `command.com` in its DOS VM honours the inherited
-error mode. A Win32 child does. If it does not, a command that needs the
-shell and touches an empty drive can still prompt; the agent will survive
-it, but the command will hang until someone dismisses the prompt.
+## Verified on the target 2026-09-22, agent build 1904
+
+Repro run against the fixed agent at `C:\W98AGENT`, D: empty:
+
+```
+$ w98link exec 'dir D:\'
+General failure reading drive D
+Abort, Retry, Fail?                       (client killed by timeout 30, rc 124)
+$ w98link info                            (immediately after)
+w98link: no answer from the agent within 10 s
+$ w98link info
+w98link: no answer from the agent within 10 s
+$ w98link info                            (about 40 s after the repro)
+agent    0.1.0_20260922.1904.win98
+```
+
+Two findings.
+
+**`command.com` does not honour the inherited error mode.** The question
+the previous section left open is answered: the prompt is raised by the DOS
+VM's INT 24h handler, which is below Win32 and does not consult
+`SetErrorMode`. A Win32 child does honour it, so `put`/`get`/`sync` against
+an empty drive are covered; a shell builtin such as `dir` is not.
+
+**Defect 2 no longer holds the agent down, but recovery is not immediate.**
+Nobody touched the machine and the prompt was never dismissed by hand; the
+agent answered by itself on the third client. Earlier behaviour was silence
+until a person intervened. The remaining latency is the reaper working
+through a DOS VM that `TerminateProcess` does not kill promptly, plus each
+displaced client resetting the session. That satisfies the standing
+requirement (short of the OS crashing, the remote side re-establishes and
+continues) and does not warrant a state machine, but the first client after
+a wedged shell command will time out once or twice.
+
+## Still open
+
+The command itself still hangs rather than failing, because the prompt is
+inside a DOS VM we cannot reach. Options, in order of appeal:
+
+1. Answer the prompt for it. DOS reads the critical-error response from the
+   VM's own keyboard buffer; nothing in Win32 can inject it. Not worth it.
+2. Give the client a way to give up on one command without killing the
+   session: a CANCEL record on the exec channel, mapped to the existing
+   `wl_proc_kill`/reaper path. That turns a 40 s wedge into a deliberate
+   `Ctrl-C` on the client and keeps the session up. This is the useful fix.
+3. Leave it. `dir` on an empty removable drive is a user error with a known
+   cost, and the agent survives it.
+
+Note for the manual: on Win9x anything that needs `command.com` (shell
+builtins, redirection, pipes) runs in a DOS VM, so it neither reports an
+exit code nor honours the error mode. Prefer real programs.

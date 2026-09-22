@@ -353,6 +353,7 @@ W98LINK_DEBUG=1 w98link sync ./src C:/SRC/src
 | "Bad command or file name" from a batch file | the file was copied by something that doubled its carriage returns. Copy it with `put`, which is byte-exact |
 | A command's exit status is always 0 | the command went through `command.com`; see section 10 |
 | The agent will not start: "cannot open COM1" | another program holds the port |
+| A command prints `Abort, Retry, Fail?` and never returns | a shell builtin hit a drive with no media; the prompt is inside DOS. See section 10 |
 | Everything stalls, then recovers after ten seconds | the link declared the peer dead and resynchronised; look for a loose connector |
 
 ## 10. Limits and known behaviour
@@ -364,6 +365,29 @@ real exit code. A command that needs the shell reports 0 on Win9x whatever
 happens. Practical rule: run the compiler directly rather than through a
 redirect if you care about its status. NT's `cmd.exe` does not have this
 problem.
+
+**Shell builtins run in a DOS VM.** The agent itself is a 32-bit Win32
+console program, but `command.com` on Windows 9x is 16-bit DOS running in a
+virtual machine, and every command that needs the shell goes through it: the
+builtins (`dir`, `copy`, `cd`, `type`, `set`), redirection, pipes, and
+anything using `%` variables. Inside that VM neither the exit code above nor
+the agent's error mode applies, so a builtin that touches a drive with no
+media raises DOS's own `Abort, Retry, Fail?` prompt on the target's screen
+and waits there forever:
+
+```
+$ w98link exec 'dir D:\'          # D: is the CD drive, empty
+General failure reading drive D
+Abort, Retry, Fail?               # no output ever arrives; Ctrl-C the client
+```
+
+The agent survives this and answers a new client on its own, though the
+first client or two afterwards may time out while the VM is being torn
+down. The command is lost either way. Prefer real programs over builtins:
+use `w98link get`/`put`/`sync` instead of `copy`, and where a listing is
+needed, a small program rather than `dir`. `SetErrorMode` at agent startup
+covers the agent's own file operations and any Win32 child, so `get` and
+`put` against an empty drive fail cleanly instead of prompting.
 
 **Paths are ASCII.** Non-ASCII paths are refused rather than guessed at.
 Paths may be up to 259 characters. Long file names work; case is preserved.
