@@ -1,15 +1,20 @@
 # w98link
 
-A compressed file and command link between a Linux workstation and a Windows 98
-machine. It exists because the options available on Windows 98 each miss
-something: Kermit and Zmodem are reliable but barely compress, and Win98's
-PPP compression (MPPC) is not something Linux pppd speaks.
+A compressed file and command link between a Linux workstation and an old
+Windows machine, for developing here and building and running there. It exists
+because the options at that end each miss something: Kermit and Zmodem are
+reliable but barely compress, and Windows' PPP compression (MPPC) is not
+something Linux pppd speaks.
 
 Two programs share one protocol core:
 
 - `w98link`, the Linux client
-- `W98AGENT.EXE`, the Win32 agent, cross-built with Open Watcom; it targets
-  Windows 98 SE and NT 4.0 or later
+- `W98AGENT.EXE`, the Win32 agent, cross-built with Open Watcom
+
+The target is **Windows 2000**. Windows 98 SE and NT 4.0 still work and the
+code for them is kept, but nothing is verified on them any more; see
+`docs/plan.md`. The names in this repo still say 98, from when it was the
+target, and change when the project is named.
 
 The first transport is a null-modem serial cable; TCP follows once the target
 has a working network card.
@@ -19,9 +24,10 @@ has a working network card.
 - `docs/protocol.md` is the wire format.
 - `docs/plan.md` is the iteration plan and what is done.
 
-Over a 115200 serial cable to a Pentium III running Windows 98 SE, a
-50-file source tree with nothing changed syncs in a quarter of a second, and
-C source moves at about 35-40 KB/s against the line's raw 11.5 KB/s.
+Measured over a 115200 serial cable to a Pentium III (a ThinkPad A21m, then
+running Windows 98 SE): a 50-file source tree with nothing changed syncs in a
+quarter of a second, and C source moves at about 35-40 KB/s against the line's
+raw 11.5 KB/s.
 
 Working name only; the project will be renamed.
 

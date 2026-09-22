@@ -1,6 +1,6 @@
 # w98link Manual
 
-A compressed, reliable link between a Linux workstation and a Windows 98 or
+A compressed, reliable link between a Linux workstation and a Windows 2000 or
 NT machine, over a serial cable now and over TCP later. This manual covers
 installation, operation, tuning, diagnosis and the limits of the thing.
 
@@ -31,7 +31,7 @@ Two programs:
 | Program | Runs on | Purpose |
 |---------|---------|---------|
 | `w98link` | Linux | the client: you type commands to it |
-| `W98AGENT.EXE` | Windows 98 SE, NT 4.0 or later | the agent: it serves one client at a time |
+| `W98AGENT.EXE` | Windows 2000 (also NT 4.0 and 98 SE) | the agent: it serves one client at a time |
 
 Both are built from the same protocol core, so both ends always agree on the
 format. The client always starts the conversation; the agent never calls out.
@@ -52,7 +52,10 @@ one client at a time, and resuming an interrupted transfer. See section 10.
 **Workstation:** Linux, a USB or built-in serial port, and read/write access
 to it (membership of the `uucp` group on Arch, `dialout` on Debian).
 
-**Target:** Windows 98 SE, or NT 4.0 or later. A free COM port. About 250 KB
+**Target:** Windows 2000, the platform this is developed against. NT 4.0 and
+Windows 98 SE also run it, the second without any current verification; where
+this manual says something is true of 98 it was measured there. A free COM
+port. About 250 KB
 of disk for the agent.
 
 **Cable:** a null-modem cable between the two serial ports. A straight-through
@@ -76,7 +79,8 @@ make debug      # or: make asan
 make help
 ```
 
-The agent is built for the Win32 API as it exists in Windows 98 and NT 4.0:
+The agent is built for the Win32 API as it exists in Windows NT 4.0 and, so
+that one binary serves both, Windows 98:
 ANSI entry points only, no function that either lacks, and no overlapped I/O
 on pipes. It runs on everything from 98 to Windows 11.
 
