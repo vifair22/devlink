@@ -106,6 +106,16 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_COMMON) $(CFLAGS_COMMON) $(VARIANT_FLAGS) -MMD -MP -c $< -o $@
 
+# BUILD_ID is stamped into version.c alone, so make has no reason to
+# recompile it when any other file changes, and a freshly built client then
+# reports a build id older than itself. That is not cosmetic: the build id is
+# how a deployment to the target is confirmed. Anything that goes into the
+# binary is a prerequisite here, so the stamp is refreshed exactly when a
+# relink was going to happen anyway. (The Win98 agent needs none of this: one
+# wcl386 call compiles every file every time.)
+$(OBJ_DIR)/core/version.o: $(filter-out $(SRC_DIR)/core/version.c,$(NATIVE_SOURCES)) \
+                           $(wildcard $(INC_DIR)/w98link/*.h) release_version
+
 $(BIN_DIR):
 	@mkdir -p $@
 
