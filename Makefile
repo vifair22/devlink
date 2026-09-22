@@ -128,7 +128,7 @@ TEST_BINS    := $(patsubst $(TEST_DIR)/test_%.c,$(BIN_DIR)/test_%,$(TEST_SOURCES
 
 $(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) | $(BIN_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
-	    -I$(TEST_DIR) -o $@ $< $(LIB_SOURCES) -lcmocka
+	    -pthread -I$(TEST_DIR) -o $@ $< $(LIB_SOURCES) -lcmocka
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do \
@@ -153,7 +153,7 @@ COV_BINS := $(patsubst $(TEST_DIR)/test_%.c,$(BUILD_DIR)/coverage/test_%,$(TEST_
 $(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES)
 	@mkdir -p $(BUILD_DIR)/coverage
 	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -I$(TEST_DIR) \
-	    -o $@ $< $(LIB_SOURCES) -lcmocka
+	    -pthread -o $@ $< $(LIB_SOURCES) -lcmocka
 
 coverage-run: $(COV_BINS)
 	@for t in $(COV_BINS); do $$t >/dev/null || true; done
