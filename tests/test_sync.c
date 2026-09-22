@@ -37,6 +37,8 @@ static void *agent_main(void *arg)
 {
     (void)arg;
     agent.result = wl_agent_serve(&agent.t, &agent.cfg, 0x5F17CU);
+    if (agent.result != WL_OK)
+        print_error("agent stopped: status %d, %s\n", (int)agent.result, wl_error());
     return NULL;
 }
 
@@ -46,14 +48,21 @@ static int should_stop(void *ctx)
     return agent.stop;
 }
 
+/* Liveness timings are part of the fixture: the impatient variant is what
+ * makes "a long operation starves the link" reproducible in a second rather
+ * than in ten. */
+static uint32_t fixture_dead_ms;
+static uint32_t fixture_keepalive_ms;
+
 static struct wl_session_cfg fast_session(void)
 {
     struct wl_session_cfg cfg;
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
-    cfg.link.bytes_per_sec = 0;
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
+    wl_session_cfg_init(&cfg);
+    if (fixture_dead_ms != 0)
+        cfg.link.dead_ms = fixture_dead_ms;
+    if (fixture_keepalive_ms != 0)
+        cfg.link.keepalive_ms = fixture_keepalive_ms;
     return cfg;
 }
 
@@ -330,18 +339,133 @@ static void test_larger_tree(void **state)
     assert_int_equal(r.needed, 0);
 }
 
+/* Writes n bytes of compressible filler. */
+static void write_big(const char *path, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    char buf[65536];
+
+    assert_non_null(f);
+    for (size_t i = 0; i < sizeof(buf); i++)
+        buf[i] = (char)('a' + (i % 26U));
+    while (n > 0) {
+        size_t k = n < sizeof(buf) ? n : sizeof(buf);
+
+        assert_int_equal(fwrite(buf, 1, k, f), k);
+        n -= k;
+    }
+    assert_int_equal(fclose(f), 0);
+}
+
+/*
+ * Regression: docs/bug-sync-hash-starves-link.md. A file the agent has to
+ * hash must not stop it servicing the link. The fixture makes the link
+ * impatient (dead after 400 ms) and gives the agent 100 MB to hash, which
+ * takes far longer than that; before the fix the session reset and the sync
+ * failed.
+ */
+static void test_hashing_does_not_starve_the_link(void **state)
+{
+    struct wl_sync_result r;
+    char src[WL_PATH_MAX];
+    char dst[WL_PATH_MAX];
+    char cmd[600];
+
+    (void)state;
+    (void)snprintf(src, sizeof(src), "%s/big.bin", src_dir);
+    (void)snprintf(dst, sizeof(dst), "%s/big.bin", dst_dir);
+    write_big(src, 100U * 1024U * 1024U);
+    assert_int_equal(wl_fs_mkdir_p(dst_dir), WL_OK);
+    /* An identical copy on the far side, with a different timestamp: the
+     * agent must hash it to find out they match. */
+    (void)snprintf(cmd, sizeof(cmd), "cp %s %s", src, dst);
+    assert_int_equal(system(cmd), 0);
+    assert_int_equal(wl_fs_set_mtime(dst, 1000000000U), WL_OK);
+    assert_int_equal(wl_fs_set_mtime(src, 1400000000U), WL_OK);
+
+    assert_int_equal(sync_now(0, &r), WL_OK);
+    if (!r.ok)
+        print_error("sync failed: code %u, %s\n", (unsigned)r.fail_code, r.message);
+    assert_true(r.ok);
+    assert_int_equal(r.needed, 0);
+    assert_int_equal(r.same, 1);
+    assert_int_equal(r.bytes, 0);
+}
+
+/* Both ends must get the impatient timings, so they are set before setup()
+ * builds the agent: an agent still keeping a 2 s keepalive while the client
+ * gives up after 400 ms proves nothing about starvation. */
+/*
+ * Regression: docs/bug-sync-connect-timeout.md. Walking and hashing a big
+ * local tree can take longer than the whole connect timeout; that time is
+ * the client's own, and must not be charged against the agent.
+ */
+static void test_connect_timeout_excludes_the_local_scan(void **state)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_sync_result r;
+    char src[WL_PATH_MAX];
+
+    (void)state;
+    (void)snprintf(src, sizeof(src), "%s/big.bin", src_dir);
+    write_big(src, 100U * 1024U * 1024U);
+    /* Hashing 100 MB takes well over 50 ms on any machine this builds on,
+     * while connecting over a pty takes under a millisecond. */
+    assert_int_equal(wl_client_sync(&client_t, &cfg, 4242, src_dir, dst_dir, 0, 50, &r),
+                     WL_OK);
+    assert_true(r.ok);
+    assert_int_equal(r.written, 1);
+}
+
+/* Regression: docs/bug-sync-hash-starves-link.md, defect 2. */
+static void test_exit_code_is_not_success_when_a_sync_failed(void **state)
+{
+    struct wl_sync_result r;
+
+    (void)state;
+    memset(&r, 0, sizeof(r));
+    r.ok = 1;
+    assert_int_equal(wl_sync_exit_code(&r), 0);
+    /* A failed sync, dry run or not, must not report success. */
+    r.ok = 0;
+    assert_int_equal(wl_sync_exit_code(&r), 1);
+    /* Nor must one that ran but could not write some files. */
+    r.ok = 1;
+    r.failed = 2;
+    assert_int_equal(wl_sync_exit_code(&r), 1);
+}
+
+static int setup_impatient(void **state)
+{
+    fixture_dead_ms = 400;
+    fixture_keepalive_ms = 100;
+    return setup(state);
+}
+
+static int setup_default(void **state)
+{
+    fixture_dead_ms = 0; /* the product defaults */
+    fixture_keepalive_ms = 0;
+    return setup(state);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test_setup_teardown(test_first_sync_copies_everything, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_second_sync_sends_only_changes, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_touched_file_is_not_resent, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_first_sync_copies_everything, setup_default, teardown),
+        cmocka_unit_test_setup_teardown(test_second_sync_sends_only_changes, setup_default, teardown),
+        cmocka_unit_test_setup_teardown(test_touched_file_is_not_resent, setup_default, teardown),
         cmocka_unit_test_setup_teardown(test_dot_files_are_skipped_unless_asked, setup,
                                         teardown),
-        cmocka_unit_test_setup_teardown(test_delete_removes_extra_files, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_dry_run_changes_nothing, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_same_size_different_contents, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_larger_tree, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_delete_removes_extra_files, setup_default, teardown),
+        cmocka_unit_test_setup_teardown(test_dry_run_changes_nothing, setup_default, teardown),
+        cmocka_unit_test_setup_teardown(test_same_size_different_contents, setup_default, teardown),
+        cmocka_unit_test_setup_teardown(test_larger_tree, setup_default, teardown),
+        cmocka_unit_test_setup_teardown(test_hashing_does_not_starve_the_link,
+                                        setup_impatient, teardown),
+        cmocka_unit_test_setup_teardown(test_connect_timeout_excludes_the_local_scan,
+                                        setup_default, teardown),
+        cmocka_unit_test(test_exit_code_is_not_success_when_a_sync_failed),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

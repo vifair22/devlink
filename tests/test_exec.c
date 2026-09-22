@@ -10,6 +10,8 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
+#include "w98link/clock.h"
+#include "w98link/wire.h"
 #include "w98link/agent.h"
 #include "w98link/client_exec.h"
 #include "w98link/proto.h"
@@ -48,10 +50,8 @@ static struct wl_session_cfg fast_session(void)
 {
     struct wl_session_cfg cfg;
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = 0; /* a pty is far faster than any serial line */
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     return cfg;
 }
 
@@ -240,6 +240,49 @@ static void test_unknown_agent_command_is_refused(void **state)
     assert_int_equal(r.fail_code, WL_E_UNKNOWN);
 }
 
+/*
+ * The invariant the whole design rests on: whatever a command is doing,
+ * the agent answers the next client. Here a client starts a long-running
+ * command and vanishes, as one would if it were killed.
+ */
+static void test_abandoned_command_does_not_block_the_next_client(void **state)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_peer_handlers h;
+    struct wl_peer *p;
+    uint8_t args[64];
+    struct wl_wbuf w;
+    uint16_t ch;
+    uint32_t start;
+    struct wl_hello hello;
+
+    (void)state;
+    memset(&h, 0, sizeof(h));
+    p = wl_peer_new(&cfg, 31337, wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
+    assert_non_null(p);
+    start = wl_clock_ms();
+    while (!wl_peer_ready(p) && wl_clock_since(start) < 3000U)
+        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+    assert_true(wl_peer_ready(p));
+
+    wl_wbuf_init(&w, args, sizeof(args));
+    wl_w_str(&w, "sleep 30", 8);
+    wl_w_str(&w, "", 0);
+    wl_w_u8(&w, 0);
+    assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &ch), WL_OK);
+    start = wl_clock_ms();
+    while (wl_clock_since(start) < 300U)
+        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+    wl_peer_free(p); /* the client is gone, the command is still running */
+
+    /* A new client must be served promptly, not after the old command has
+     * been confirmed dead. */
+    start = wl_clock_ms();
+    assert_int_equal(wl_client_info(&client_t, &cfg, 4242, 3000, &hello), WL_OK);
+    assert_true(wl_clock_since(start) < 2500U);
+    assert_int_equal(hello.platform, WL_PLATFORM_LINUX);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -253,6 +296,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_agent_stop_command, setup, teardown),
         cmocka_unit_test_setup_teardown(test_unknown_agent_command_is_refused, setup,
                                         teardown),
+        cmocka_unit_test_setup_teardown(test_abandoned_command_does_not_block_the_next_client,
+                                        setup, teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

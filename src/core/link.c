@@ -1,6 +1,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <stdio.h>
+
 #include "w98link/bytes.h"
 #include "w98link/link.h"
 
@@ -8,8 +10,6 @@
  * "Liveness". */
 #define SYNC_INTERVAL_MS 500U
 #define ACK_DELAY_MS 20U
-#define KEEPALIVE_MS 2000U
-#define DEAD_MS 10000U
 #define RTO_INIT_MS 500U
 #define RTO_MIN_MS 200U
 #define RTO_MAX_MS 5000U
@@ -83,6 +83,9 @@ struct wl_link {
     uint32_t ack_due_at;
     uint32_t last_rx;
 
+    /* Only for the WL_LINK_TRACE messages, so two links in one process (the
+     * tests, or a client and agent on one machine) can be told apart. */
+    unsigned trace_id;
     struct wl_frame_rx frx;
     uint32_t now; /* time of the wl_link_rx call, for the frame callback */
     struct wl_link_stats stats;
@@ -227,6 +230,9 @@ static void learn_peer(struct wl_link *l, const uint8_t *p, uint32_t now)
     /* A different id from a known peer means it restarted: its streams are
      * new, so ours must be too. */
     if (l->have_peer && id != l->peer_id && (l->state == ST_UP || l->my_sync_acked)) {
+        if (getenv("WL_LINK_TRACE") != NULL)
+            fprintf(stderr, "[link %u] reset: peer restarted (id %08lx -> %08lx)\n", l->trace_id,
+                    (unsigned long)l->peer_id, (unsigned long)id);
         reset_session(l, now, 0);
         l->stats.resets++;
     }
@@ -494,7 +500,7 @@ static int due_resend(const struct wl_link *l, uint32_t now, uint16_t *seq_out)
 static int ack_due(const struct wl_link *l, uint32_t now)
 {
     return l->ack_now || (l->ack_timer && !time_before(now, l->ack_due_at)) ||
-           !time_before(now, l->last_tx + KEEPALIVE_MS);
+           !time_before(now, l->last_tx + l->cfg.keepalive_ms);
 }
 
 size_t wl_link_poll_tx(struct wl_link *l, uint8_t *out, size_t cap, uint32_t now)
@@ -503,7 +509,11 @@ size_t wl_link_poll_tx(struct wl_link *l, uint8_t *out, size_t cap, uint32_t now
 
     if (cap < WL_FRAME_MAX_WIRE)
         return 0;
-    if (l->state == ST_UP && !time_before(now, l->last_rx + DEAD_MS)) {
+    if (l->state == ST_UP && !time_before(now, l->last_rx + l->cfg.dead_ms)) {
+        if (getenv("WL_LINK_TRACE") != NULL)
+            fprintf(stderr, "[link %u] reset: no frame for %u ms (limit %u), last_tx %u ms ago\n",
+                    l->trace_id, (unsigned)(now - l->last_rx), (unsigned)l->cfg.dead_ms,
+                    (unsigned)(now - l->last_tx));
         reset_session(l, now, 1);
         l->stats.resets++;
     }
@@ -590,8 +600,8 @@ uint32_t wl_link_next_timeout(const struct wl_link *l, uint32_t now)
             SOONER(0);
         if (l->ack_timer)
             SOONER(time_until(l->ack_due_at, now));
-        SOONER(time_until(l->last_tx + KEEPALIVE_MS, now));
-        SOONER(time_until(l->last_rx + DEAD_MS, now));
+        SOONER(time_until(l->last_tx + l->cfg.keepalive_ms, now));
+        SOONER(time_until(l->last_rx + l->cfg.dead_ms, now));
     }
 #undef SOONER
     /* Nothing can be sent before the port drains, so waking earlier than
@@ -602,6 +612,16 @@ uint32_t wl_link_next_timeout(const struct wl_link *l, uint32_t now)
 /* ---------------------------------------------------------------------------
  * public
  * ------------------------------------------------------------------------- */
+
+void wl_link_cfg_init(struct wl_link_cfg *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->max_payload = WL_SERIAL_MAX_PAYLOAD;
+    cfg->window = (uint8_t)WL_LINK_DEFAULT_WINDOW;
+    cfg->bytes_per_sec = 0;
+    cfg->dead_ms = WL_LINK_DEFAULT_DEAD_MS;
+    cfg->keepalive_ms = WL_LINK_DEFAULT_KEEPALIVE_MS;
+}
 
 struct wl_link *wl_link_new(const struct wl_link_cfg *cfg, uint32_t seed, uint32_t now)
 {
@@ -620,6 +640,15 @@ struct wl_link *wl_link_new(const struct wl_link_cfg *cfg, uint32_t seed, uint32
         l->cfg.max_payload = MIN_PAYLOAD_OFFER;
     if (l->cfg.window == 0 || l->cfg.window > WL_LINK_MAX_WINDOW)
         l->cfg.window = WL_LINK_DEFAULT_WINDOW;
+    if (l->cfg.dead_ms == 0)
+        l->cfg.dead_ms = WL_LINK_DEFAULT_DEAD_MS;
+    if (l->cfg.keepalive_ms == 0)
+        l->cfg.keepalive_ms = WL_LINK_DEFAULT_KEEPALIVE_MS;
+    {
+        static unsigned next_trace_id;
+
+        l->trace_id = ++next_trace_id;
+    }
     l->rng = seed != 0 ? seed : 0x6D2B79F5U;
     (void)next_random(l);
     wl_frame_rx_init(&l->frx, l->cfg.max_payload);

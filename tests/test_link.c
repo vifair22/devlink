@@ -118,6 +118,7 @@ static struct wl_link *make_link(uint32_t seed, uint16_t max_payload, uint8_t wi
     struct wl_link_cfg cfg;
     struct wl_link *l;
 
+    wl_link_cfg_init(&cfg);
     cfg.max_payload = max_payload;
     cfg.window = window;
     cfg.bytes_per_sec = sim.w.line.bytes_per_sec;
@@ -332,8 +333,11 @@ static void test_idle_link_stays_up(void **state)
 
 static void test_send_before_up_is_refused(void **state)
 {
-    struct wl_link_cfg cfg = {WL_SERIAL_MAX_PAYLOAD, 16, 0};
-    struct wl_link *l = wl_link_new(&cfg, 1, 0);
+    struct wl_link_cfg cfg;
+    struct wl_link *l;
+
+    wl_link_cfg_init(&cfg);
+    l = wl_link_new(&cfg, 1, 0);
     uint8_t b = 0;
 
     (void)state;

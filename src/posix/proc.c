@@ -198,6 +198,23 @@ void wl_proc_kill(struct wl_proc *p)
         (void)kill(p->pid, SIGKILL);
 }
 
+int wl_proc_reap(struct wl_proc *p)
+{
+    uint32_t code;
+
+    if (p == NULL)
+        return 1;
+    if (!wl_proc_exited(p, &code)) {
+        wl_proc_kill(p);
+        return 0; /* wl_proc_exited reaps it on a later call */
+    }
+    close_fd(&p->in_fd);
+    close_fd(&p->out_fd);
+    close_fd(&p->err_fd);
+    free(p);
+    return 1;
+}
+
 void wl_proc_free(struct wl_proc *p)
 {
     uint32_t code;

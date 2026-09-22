@@ -28,6 +28,8 @@
 #define WL_LINK_MAX_WINDOW 32U /* bounded by the 32-bit selective-ack field */
 #define WL_LINK_DEFAULT_WINDOW 16U
 #define WL_LINK_QUEUE 32768U /* bytes buffered each way above the window */
+#define WL_LINK_DEFAULT_DEAD_MS 10000U
+#define WL_LINK_DEFAULT_KEEPALIVE_MS 2000U
 
 struct wl_link_cfg {
     uint16_t max_payload; /* offered; the session uses the smaller offer */
@@ -36,7 +38,22 @@ struct wl_link_cfg {
      * when they actually leave rather than when they were queued. 0 turns
      * both off. */
     uint32_t bytes_per_sec;
+    /* How long without a valid frame before the session is declared dead,
+     * and how long an idle side waits before sending a keepalive. 0 uses
+     * the defaults below. Lowering both makes starvation bugs reproducible
+     * in tests; nothing else should change them, and dead_ms must stay
+     * several times keepalive_ms. */
+    uint32_t dead_ms;
+    uint32_t keepalive_ms;
 };
+
+/*
+ * Fills cfg with the defaults. Every caller must start here and then
+ * override what it needs: building one field by field leaves any field
+ * added later as stack garbage, which is how a stray dead_ms once made
+ * sessions reset at random.
+ */
+void wl_link_cfg_init(struct wl_link_cfg *cfg);
 
 struct wl_link_stats {
     uint32_t data_sent;    /* DATA frames, first transmissions */

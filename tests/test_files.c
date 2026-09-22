@@ -48,10 +48,7 @@ static struct wl_session_cfg fast_session(void)
 {
     struct wl_session_cfg cfg;
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
-    cfg.link.bytes_per_sec = 0;
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
+    wl_session_cfg_init(&cfg);
     return cfg;
 }
 

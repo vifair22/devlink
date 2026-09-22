@@ -68,10 +68,8 @@ static int cmd_serve(int argc, char **argv)
         return 1;
     }
     memset(&cfg, 0, sizeof(cfg));
-    cfg.session.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.session.link.window = WL_LINK_DEFAULT_WINDOW;
+    wl_session_cfg_init(&cfg.session);
     cfg.session.link.bytes_per_sec = (uint32_t)(baud / 10UL);
-    cfg.session.level = WL_SESSION_DEFAULT_LEVEL;
     cfg.platform = platform();
     cfg.log = console_log;
     if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
@@ -133,10 +131,8 @@ static int cmd_linktest(int argc, char **argv)
         fputs(help, stderr);
         return 1;
     }
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = (uint32_t)(baud / 10UL);
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
         fprintf(stderr, "W98AGENT: %s\n", wl_error());
         return 1;
@@ -160,6 +156,16 @@ static int cmd_linktest(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    /*
+     * Touching a drive with no media makes Windows raise a critical error,
+     * which by default becomes a prompt that waits for a person at the
+     * keyboard: exactly what an unattended agent must not do
+     * (docs/bug-critical-error-hang.md). The mode is inherited by every
+     * child, since CreateProcess is not given CREATE_DEFAULT_ERROR_MODE,
+     * so "dir D:" on an empty drive returns an error instead of hanging.
+     */
+    (void)SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
         printf("w98agent %s\n", wl_version());
         print_platform();

@@ -55,6 +55,12 @@ struct xfer {
     int at_eof;
 };
 
+struct pending_hash {
+    char rel[WL_PATH_MAX];
+    uint8_t want[WL_HASH_BYTES];
+    uint64_t mtime; /* the client's, to adopt if the contents match */
+};
+
 /* A sync in progress. Manifest paths are only remembered when the client
  * asked for deletions, which is the one case that needs the whole set. */
 struct sync {
@@ -77,6 +83,17 @@ struct sync {
     size_t seen_len;
     size_t seen_cap;
     int seen_overflow;
+    /* Files whose size matches but whose time does not: their contents
+     * decide, and hashing them is far too slow to do while holding up the
+     * link, so they are queued here and hashed a chunk at a time between
+     * pumps (docs/bug-sync-hash-starves-link.md). */
+    struct pending_hash *pend;
+    size_t n_pend;
+    size_t cap_pend;
+    size_t pend_at;
+    FILE *hash_f;          /* the file being hashed, if any */
+    struct wl_sha256 hash; /* its state so far */
+
     /* The file being received. */
     FILE *f;
     char path[WL_PATH_MAX];
@@ -94,6 +111,10 @@ struct agent {
     struct exec execs[WL_AGENT_MAX_EXEC];
     struct xfer xfers[WL_AGENT_MAX_XFER];
     struct sync sync;
+    /* Processes being torn down. Abandoning a command must never hold up
+     * the link (docs/bug-critical-error-hang.md, defect 2), so they are
+     * killed here and collected a little at a time by the serving loop. */
+    struct wl_proc *reaping[WL_AGENT_MAX_EXEC];
     int stopping; /* @stop received: finish the exchange, then return */
 };
 
@@ -138,11 +159,33 @@ static struct exec *find_exec(struct agent *a, uint16_t ch)
     return NULL;
 }
 
-static void end_exec(struct exec *e)
+/* Ends a command without blocking: the process goes to the reaper. */
+static void end_exec(struct agent *a, struct exec *e)
 {
-    wl_proc_free(e->proc);
+    if (e->proc != NULL) {
+        unsigned i;
+
+        for (i = 0; i < WL_AGENT_MAX_EXEC; i++) {
+            if (a->reaping[i] == NULL) {
+                a->reaping[i] = e->proc;
+                break;
+            }
+        }
+        /* Only if every slot is taken, which needs several wedged children
+         * at once, does this fall back to waiting. */
+        if (i == WL_AGENT_MAX_EXEC)
+            wl_proc_free(e->proc);
+    }
     free(e->stdin_q);
     memset(e, 0, sizeof(*e));
+}
+
+static void reap(struct agent *a)
+{
+    for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
+        if (a->reaping[i] != NULL && wl_proc_reap(a->reaping[i]))
+            a->reaping[i] = NULL;
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -157,7 +200,7 @@ static void on_session(void *ctx)
      * and its half-written uploads are worthless. */
     for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
         if (a->execs[i].active)
-            end_exec(&a->execs[i]);
+            end_exec(a, &a->execs[i]);
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
         if (a->xfers[i].active)
@@ -256,9 +299,7 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
         free(e->stdin_q);
         e->stdin_q = NULL;
     } else if (wl_peer_accept(a->peer, ch) != WL_OK) {
-        wl_proc_free(e->proc);
-        free(e->stdin_q);
-        memset(e, 0, sizeof(*e));
+        end_exec(a, e);
     } else {
         e->active = 1;
         e->ch = ch;
@@ -398,12 +439,15 @@ static void open_get(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
 
 static void sync_end(struct sync *y)
 {
+    if (y->hash_f != NULL)
+        (void)fclose(y->hash_f);
     if (y->f != NULL)
         (void)fclose(y->f);
     if (y->tmp[0] != '\0')
         (void)wl_fs_remove(y->tmp);
     free(y->need);
     free(y->seen);
+    free(y->pend);
     memset(y, 0, sizeof(*y));
 }
 
@@ -471,7 +515,6 @@ static void sync_entry(struct agent *a, struct sync *y, const char *rel, uint64_
     char full[WL_PATH_MAX];
     uint64_t have_size;
     uint64_t have_mtime;
-    uint8_t digest[32];
     int is_dir;
 
     sync_remember(y, rel);
@@ -489,18 +532,94 @@ static void sync_entry(struct agent *a, struct sync *y, const char *rel, uint64_
         y->same++;
         return;
     }
-    /* Same size, different time: the contents decide. */
-    if (!wl_sha256_file(full, digest) || memcmp(digest, hash, WL_HASH_BYTES) != 0) {
-        if (!sync_queue_need(y, rel))
-            y->failed++;
-        return;
+    /* Same size, different time: the contents decide, later and in slices. */
+    if (y->n_pend == y->cap_pend) {
+        size_t cap = y->cap_pend == 0 ? 32 : y->cap_pend * 2;
+        struct pending_hash *grown = realloc(y->pend, cap * sizeof(*grown));
+
+        if (grown == NULL) {
+            /* Cannot check it, so send it: wasteful, never wrong. */
+            if (!sync_queue_need(y, rel))
+                y->failed++;
+            return;
+        }
+        y->pend = grown;
+        y->cap_pend = cap;
     }
-    y->same++;
-    /* Only the timestamp differed, so line it up and the next sync takes
-     * the cheap path. */
-    if ((y->flags & WL_SYNC_DRY_RUN) == 0)
-        (void)wl_fs_set_mtime(full, mtime);
+    {
+        struct pending_hash *ph = &y->pend[y->n_pend++];
+
+        (void)snprintf(ph->rel, sizeof(ph->rel), "%s", rel);
+        memcpy(ph->want, hash, WL_HASH_BYTES);
+        ph->mtime = mtime;
+    }
     (void)a;
+}
+
+/* Hashes at most this much per call, so the link is serviced every few
+ * tens of milliseconds even on the target's disk. */
+#define HASH_SLICE 262144U
+
+/* Advances the hashing cursor by one slice. Returns 1 while work remains. */
+static int sync_hash_step(struct sync *y)
+{
+    struct pending_hash *ph;
+    char full[WL_PATH_MAX];
+    uint8_t buf[16384];
+    size_t done = 0;
+
+    if (y->pend_at >= y->n_pend)
+        return 0;
+    ph = &y->pend[y->pend_at];
+    if (y->hash_f == NULL) {
+        if (!wl_fs_join(full, sizeof(full), y->root, ph->rel)) {
+            y->pend_at++;
+            return 1;
+        }
+        y->hash_f = fopen(full, "rb");
+        wl_sha256_init(&y->hash);
+        if (y->hash_f == NULL) {
+            /* Unreadable now, though it was there a moment ago: ask for it. */
+            if (!sync_queue_need(y, ph->rel))
+                y->failed++;
+            y->pend_at++;
+            return 1;
+        }
+    }
+    while (done < HASH_SLICE) {
+        size_t n = fread(buf, 1, sizeof(buf), y->hash_f);
+
+        if (n > 0) {
+            wl_sha256_update(&y->hash, buf, n);
+            done += n;
+        }
+        if (n < sizeof(buf))
+            break; /* end of file, or a read error */
+    }
+    if (done >= HASH_SLICE)
+        return 1; /* more of this file next time round */
+
+    {
+        uint8_t digest[32];
+        int bad = ferror(y->hash_f) != 0;
+
+        (void)fclose(y->hash_f);
+        y->hash_f = NULL;
+        wl_sha256_final(&y->hash, digest);
+        if (bad || memcmp(digest, ph->want, WL_HASH_BYTES) != 0) {
+            if (!sync_queue_need(y, ph->rel))
+                y->failed++;
+        } else {
+            y->same++;
+            /* Only the timestamp differed: line it up so the next sync
+             * takes the cheap path and never hashes this file again. */
+            if ((y->flags & WL_SYNC_DRY_RUN) == 0 &&
+                wl_fs_join(full, sizeof(full), y->root, ph->rel))
+                (void)wl_fs_set_mtime(full, ph->mtime);
+        }
+    }
+    y->pend_at++;
+    return 1;
 }
 
 struct delete_ctx {
@@ -693,6 +812,10 @@ static void service_sync(struct agent *a, struct sync *y)
 {
     uint8_t buf[WL_REC_MAX_PAYLOAD];
 
+    /* Hashing runs whether or not the whole manifest has arrived, one
+     * slice per loop iteration, so the link is always serviced in between. */
+    if (sync_hash_step(y))
+        return;
     /* 1 means the manifest arrived and the answer is still to go out;
      * 2 means it has gone. */
     if (y->manifest_done != 1)
@@ -901,7 +1024,7 @@ static void on_closed(void *ctx, uint16_t ch)
     /* The client hung up on a running command (Ctrl-C on its side). */
     if (e != NULL && !e->close_sent) {
         (void)wl_peer_close(a->peer, ch);
-        end_exec(e);
+        end_exec(a, e);
     }
     if (x != NULL) {
         (void)wl_peer_close(a->peer, ch);
@@ -978,7 +1101,7 @@ static void service_exec(struct agent *a, struct exec *e)
         }
         if (e->exit_sent && !e->close_sent && wl_peer_close(a->peer, e->ch) == WL_OK) {
             e->close_sent = 1;
-            end_exec(e);
+            end_exec(a, e);
         }
     }
 }
@@ -1070,6 +1193,7 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
         }
         if (a->sync.active)
             service_sync(a, &a->sync);
+        reap(a);
     }
     if (a->stopping && st == WL_OK) {
         /* Give the acknowledgement of @stop time to reach the client, so it
@@ -1083,7 +1207,7 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
         if (a->execs[i].active)
-            end_exec(&a->execs[i]);
+            end_exec(a, &a->execs[i]);
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
         if (a->xfers[i].active)
@@ -1091,6 +1215,11 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
     }
     if (a->sync.active)
         sync_end(&a->sync);
+    /* Shutting down is the one place that may wait for a child. */
+    for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
+        if (a->reaping[i] != NULL)
+            wl_proc_free(a->reaping[i]);
+    }
     wl_peer_free(a->peer);
     free(a);
     return st;

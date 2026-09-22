@@ -107,10 +107,8 @@ static struct wl_session *make_session(uint32_t seed)
     struct wl_session_cfg cfg;
     struct wl_session *s;
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = w.line.bytes_per_sec;
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     s = wl_session_new(&cfg, seed, sim_now_ms(&w));
     assert_non_null(s);
     return s;

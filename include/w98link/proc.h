@@ -41,7 +41,17 @@ int wl_proc_exited(struct wl_proc *p, uint32_t *code);
 
 void wl_proc_kill(struct wl_proc *p);
 
-/* Kills the process if it is still running, then releases everything. */
+/* Kills the process if it is still running, then releases everything. May
+ * block for a few seconds, so it is for shutdown, not for the serving loop. */
 void wl_proc_free(struct wl_proc *p);
+
+/*
+ * Non-blocking teardown, for abandoning a command without holding up the
+ * link: asks the process to die, releases what it can, and returns 1 only
+ * once everything is gone. Call it again each time round the loop until it
+ * does. Nothing here ever waits, so a wedged child costs a little memory
+ * rather than the agent's responsiveness.
+ */
+int wl_proc_reap(struct wl_proc *p);
 
 #endif

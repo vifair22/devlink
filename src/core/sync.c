@@ -334,6 +334,11 @@ static void send_files(struct sync *s)
     }
 }
 
+int wl_sync_exit_code(const struct wl_sync_result *r)
+{
+    return r->ok && r->failed == 0 ? 0 : 1;
+}
+
 wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cfg,
                          uint32_t seed, const char *local_root, const char *remote_root,
                          uint8_t flags, uint32_t connect_timeout_ms,
@@ -344,6 +349,7 @@ wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cf
     uint8_t args[WL_PATH_MAX + 8];
     struct wl_wbuf w;
     uint32_t start = wl_clock_ms();
+    uint32_t connect_start;
     wl_status st;
 
     memset(out, 0, sizeof(*out));
@@ -378,6 +384,11 @@ wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cf
         return WL_ERR_NOMEM;
     }
 
+    /* The connect deadline runs from here, not from the call: walking and
+     * hashing the local tree can take longer than the whole timeout, and
+     * that time is not the agent's fault. out->elapsed_ms still covers the
+     * scan, since that is what the user waited for. */
+    connect_start = wl_clock_ms();
     st = WL_OK;
     while (s.phase != PH_DONE && s.phase != PH_FAILED) {
         st = wl_peer_pump(s.peer, t, PUMP_MS);
@@ -390,7 +401,7 @@ wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cf
                 if (st != WL_OK)
                     goto out_done;
                 s.phase = PH_OPENING;
-            } else if (wl_clock_since(start) >= connect_timeout_ms) {
+            } else if (wl_clock_since(connect_start) >= connect_timeout_ms) {
                 st = wl_fail(WL_ERR_IO, "no answer from the agent within %u s",
                              (unsigned)(connect_timeout_ms / 1000U));
                 goto out_done;

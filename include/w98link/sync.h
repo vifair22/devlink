@@ -29,6 +29,12 @@ struct wl_sync_result {
     char message[256];
 };
 
+/* The exit status a client should use for a finished sync: 0 only when it
+ * actually succeeded. A dry run that failed used to report success, which
+ * is the worst possible answer for the command people run before deleting
+ * things (docs/bug-sync-hash-starves-link.md, defect 2). */
+int wl_sync_exit_code(const struct wl_sync_result *r);
+
 wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cfg,
                          uint32_t seed, const char *local_root, const char *remote_root,
                          uint8_t flags, uint32_t connect_timeout_ms,

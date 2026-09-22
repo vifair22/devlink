@@ -393,6 +393,46 @@ static void join(HANDLE *thread)
     *thread = NULL;
 }
 
+int wl_proc_reap(struct wl_proc *p)
+{
+    uint32_t code;
+
+    if (p == NULL)
+        return 1;
+    if (!p->stopping) {
+        /* First call: ask everything to stop, then leave. */
+        if (!wl_proc_exited(p, &code))
+            wl_proc_kill(p);
+        InterlockedExchange((LONG *)&p->stopping, 1);
+        if (p->in_wake != NULL)
+            SetEvent(p->in_wake);
+        /* Closing our ends breaks the pipes, which is what wakes a reader
+         * blocked in ReadFile. */
+        close_handle(&p->out.pipe);
+        close_handle(&p->err.pipe);
+        return 0;
+    }
+    if (!wl_proc_exited(p, &code))
+        return 0;
+    /* Threads are checked, never waited for: a reader still blocked because
+     * a grandchild holds the pipe open must not stall the agent. It is
+     * checked again next time round. TerminateThread is not used at all;
+     * killing a thread holding the C runtime lock breaks the whole agent. */
+    if ((p->out.thread != NULL && WaitForSingleObject(p->out.thread, 0) != WAIT_OBJECT_0) ||
+        (p->err.thread != NULL && WaitForSingleObject(p->err.thread, 0) != WAIT_OBJECT_0) ||
+        (p->in.thread != NULL && WaitForSingleObject(p->in.thread, 0) != WAIT_OBJECT_0))
+        return 0;
+    close_handle(&p->out.thread);
+    close_handle(&p->err.thread);
+    close_handle(&p->in.thread);
+    close_handle(&p->in.pipe);
+    close_handle(&p->in_wake);
+    CloseHandle(p->process);
+    DeleteCriticalSection(&p->lock);
+    free(p);
+    return 1;
+}
+
 void wl_proc_free(struct wl_proc *p)
 {
     uint32_t code;

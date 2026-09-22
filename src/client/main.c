@@ -360,10 +360,9 @@ static int cmd_linktest(int argc, char **argv)
         bytes = (uint32_t)len;
     }
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
+    wl_session_cfg_init(&cfg);
     cfg.link.window = (uint8_t)window;
     cfg.link.bytes_per_sec = baud / 10U;
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     if (wl_serial_open(line, baud, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         free(data);
@@ -411,10 +410,8 @@ static struct wl_session_cfg serial_session(uint32_t baud)
 {
     struct wl_session_cfg cfg;
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = baud / 10U;
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     return cfg;
 }
 
@@ -603,6 +600,14 @@ static int cmd_sync(int argc, char **argv)
     }
     printf("%u file(s) here, %u already there, %u to send\n", (unsigned)r.scanned,
            (unsigned)r.same, (unsigned)r.needed);
+    /* Checked before the dry-run branch: a dry run that failed used to print
+     * a plausible summary and exit 0, which is exactly the wrong answer for
+     * the command people run before deleting things. */
+    if (wl_sync_exit_code(&r) != 0) {
+        fprintf(stderr, "w98link: sync failed: %s\n",
+                r.message[0] != '\0' ? r.message : "unknown error");
+        return 1;
+    }
     if (dry_run) {
         printf("dry run: nothing was changed\n");
         return 0;
@@ -610,9 +615,7 @@ static int cmd_sync(int argc, char **argv)
     printf("sent %u, deleted %u, failed %u; %llu bytes in %.1f s\n", (unsigned)r.written,
            (unsigned)r.deleted, (unsigned)r.failed, (unsigned long long)r.bytes,
            (double)r.elapsed_ms / 1000.0);
-    if (!r.ok && r.message[0] != '\0')
-        fprintf(stderr, "w98link: %s\n", r.message);
-    return r.ok ? 0 : 1;
+    return 0;
 }
 
 static int cmd_info(int argc, char **argv)

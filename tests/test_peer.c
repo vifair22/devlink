@@ -123,10 +123,8 @@ static struct wl_peer *make_peer(struct side *s, int is_client, uint32_t seed, u
     struct wl_session_cfg cfg;
     struct wl_peer_handlers h;
 
-    cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    cfg.link.window = WL_LINK_DEFAULT_WINDOW;
+    wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = w.line.bytes_per_sec;
-    cfg.level = WL_SESSION_DEFAULT_LEVEL;
     memset(&h, 0, sizeof(h));
     h.ctx = s;
     h.session = h_session;

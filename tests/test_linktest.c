@@ -39,10 +39,7 @@ static void test_probe_through_echo_server(void **state)
     memset(&srv, 0, sizeof(srv));
     /* A pty moves bytes far faster than 115200, so the pacing rate is set
      * well above what the test will reach; the protocol is the same. */
-    srv.cfg.link.max_payload = WL_SERIAL_MAX_PAYLOAD;
-    srv.cfg.link.window = WL_LINK_DEFAULT_WINDOW;
-    srv.cfg.link.bytes_per_sec = 0;
-    srv.cfg.level = WL_SESSION_DEFAULT_LEVEL;
+    wl_session_cfg_init(&srv.cfg);
     pty_pair(&srv.t, &probe);
     assert_int_equal(pthread_create(&th, NULL, serve_thread, &srv), 0);
 
@@ -62,10 +59,11 @@ static void test_serve_gives_up_without_peer(void **state)
 {
     struct wl_transport a;
     struct wl_transport b;
-    struct wl_session_cfg cfg = {{WL_SERIAL_MAX_PAYLOAD, 16, 0}, WL_SESSION_DEFAULT_LEVEL};
+    struct wl_session_cfg cfg;
     struct wl_linktest_result r;
 
     (void)state;
+    wl_session_cfg_init(&cfg);
     pty_pair(&a, &b);
     assert_int_equal(wl_linktest_serve(&a, &cfg, 1, 300, 1000, &r), WL_OK);
     assert_int_equal(r.bytes, 0);

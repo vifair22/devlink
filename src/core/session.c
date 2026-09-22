@@ -215,6 +215,13 @@ wl_status wl_session_pump(struct wl_session *s, struct wl_transport *t,
     return wl_session_work(s);
 }
 
+void wl_session_cfg_init(struct wl_session_cfg *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    wl_link_cfg_init(&cfg->link);
+    cfg->level = WL_SESSION_DEFAULT_LEVEL;
+}
+
 struct wl_session *wl_session_new(const struct wl_session_cfg *cfg, uint32_t seed,
                                   uint32_t now)
 {

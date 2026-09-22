@@ -30,6 +30,9 @@ struct wl_session_cfg {
     int level; /* zlib level 0-9; the peer needs no knowledge of it */
 };
 
+/* As wl_link_cfg_init, for the whole session configuration. */
+void wl_session_cfg_init(struct wl_session_cfg *cfg);
+
 struct wl_session_stats {
     uint64_t plain_out; /* plaintext bytes compressed and sent */
     uint64_t plain_in;  /* plaintext bytes received and decompressed */
