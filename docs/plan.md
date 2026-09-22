@@ -13,7 +13,7 @@ is only needed once there is an agent feature to try.
 | 4 | Reliability: sequence numbers, sliding window, ack/retransmit | survives a lossy simulated link in tests |
 | 5 | Compression: vendored zlib, session-long streams, flush points | measured ratio on source trees; interactive latency OK |
 | 6 | Channels and `exec` with streamed output | done: `w98link exec` runs commands on the A21m |
-| 7 | `send` / `get` | round-trip files, including long names |
+| 7 | `put` / `get` | done: files round-trip byte-exact; the agent updates itself |
 | 8 | `sync`: hash manifests, send only changed files | edit-build loop pushes only the delta |
 | 9 | TCP transport | same features over the new NIC |
 | 10 | NT pass | full suite against an NT 4.0/2000 agent (VM is fine) |

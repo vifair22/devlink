@@ -1,7 +1,7 @@
 # w98link protocol, version 1
 
-Status: agreed in iteration 1. Implemented so far: serial framing, link,
-compression, mux and EXEC (iterations 2-6).
+Status: agreed in iteration 1. Implemented so far: everything except SYNC
+and the TCP transport (iterations 2-7).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
@@ -277,6 +277,11 @@ does no newline or character-set translation.
 STDIN is carried from v1 so that the v2 interactive shell needs no protocol
 change. A v1 client simply sends STDIN_EOF straight away.
 
+A command starting with `@` addresses the agent itself rather than the shell.
+The only one in v1 is `@stop`, which makes the agent reply with exit status 0
+and then exit, so its launcher can put a newly uploaded binary in place and
+start it again. Unknown `@` commands are refused with OPEN_FAIL.
+
 Implementation notes for the agent (not wire format), all measured on the
 Windows 98 SE target:
 
@@ -312,6 +317,16 @@ A PUT that fails part-way leaves the destination untouched.
 OPEN arguments: `str path`. The agent replies with META (type 5: `u64 size`,
 `u64 mtime`), then DATA records, then END with the CRC. The client writes to a
 temporary name and renames on success, as the agent does for PUT.
+
+PUT and GET both run over a channel of their kind with these record types:
+
+| Type | Name | Direction | Payload |
+|------|------|-----------|---------|
+| 1 | DATA | sender -> receiver | bytes |
+| 2 | END | sender -> receiver | `u32 crc32` of the whole file |
+| 3 | DONE | receiver -> sender | none |
+| 4 | FAIL | receiver -> sender | `u16 code`, `str message` |
+| 5 | META | agent -> client (GET) | `u64 size`, `u64 mtime` |
 
 ### SYNC (make a directory on the agent match one on the client)
 

@@ -6,6 +6,7 @@
 
 #include "w98link/client_exec.h"
 #include "w98link/clock.h"
+#include "w98link/file_ops.h"
 #include "w98link/echo.h"
 #include "w98link/linktest.h"
 #include "w98link/proto.h"
@@ -24,6 +25,9 @@ static const char *const help_main =
     "\n"
     "commands:\n"
     "  exec      run a command on the agent and stream its output\n"
+    "  put       copy a local file to the agent\n"
+    "  get       copy a file from the agent\n"
+    "  info      show the agent's version and platform\n"
     "  echo      test the cable and ports against 'W98AGENT echo'\n"
     "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
     "\n"
@@ -51,6 +55,25 @@ static const char *const help_exec =
     "  --baud N      line speed (default 115200)\n"
     "  --cwd DIR     directory to run in, on the agent (default: its own)\n"
     "  --merge       send stderr down stdout, preserving their interleaving\n";
+
+static const char *const help_info =
+    "usage: w98link info [--line PATH] [--baud N]\n"
+    "\n"
+    "Connects to the agent, prints what it reports about itself, and\n"
+    "disconnects.\n";
+
+static const char *const help_put =
+    "usage: w98link put [--line PATH] [--baud N] [--force] LOCAL REMOTE\n"
+    "\n"
+    "Copies LOCAL to REMOTE on the agent, compressed, with a CRC check. The\n"
+    "file lands under a temporary name and is renamed once it is verified.\n"
+    "\n"
+    "  --force       overwrite REMOTE if it exists\n";
+
+static const char *const help_get =
+    "usage: w98link get [--line PATH] [--baud N] REMOTE LOCAL\n"
+    "\n"
+    "Copies REMOTE from the agent to LOCAL, with the same checks.\n";
 
 static const char *const help_linktest =
     "usage: w98link linktest [--line PATH] [--baud N] [--bytes N] [--window N]\n"
@@ -121,6 +144,51 @@ static int parse_opts(int argc, char **argv, struct opt *opts, size_t n_opts)
         *opts[k].value = argv[++i];
     }
     return i;
+}
+
+/* For commands with a fixed number of positional arguments, where options
+ * may appear anywhere: "put a b --force" reads as naturally as
+ * "put --force a b". Returns the positional count, or -1 on error. */
+static int parse_opts_mixed(int argc, char **argv, struct opt *opts, size_t n_opts,
+                            char **pos, int max_pos)
+{
+    int n_pos = 0;
+    int only_positional = 0;
+
+    for (int i = 0; i < argc; i++) {
+        size_t k;
+
+        if (!only_positional && strcmp(argv[i], "--") == 0) {
+            only_positional = 1;
+            continue;
+        }
+        if (only_positional || strncmp(argv[i], "--", 2) != 0) {
+            if (n_pos >= max_pos) {
+                (void)usage_error("unexpected argument", argv[i]);
+                return -1;
+            }
+            pos[n_pos++] = argv[i];
+            continue;
+        }
+        for (k = 0; k < n_opts; k++) {
+            if (strcmp(argv[i], opts[k].name) == 0)
+                break;
+        }
+        if (k == n_opts) {
+            (void)usage_error("unknown option", argv[i]);
+            return -1;
+        }
+        if (opts[k].on != NULL) {
+            *opts[k].on = 1;
+            continue;
+        }
+        if (i + 1 >= argc) {
+            (void)usage_error("missing value for option", argv[i]);
+            return -1;
+        }
+        *opts[k].value = argv[++i];
+    }
+    return n_pos;
 }
 
 static int parse_all_opts(int argc, char **argv, struct opt *opts, size_t n_opts)
@@ -413,6 +481,113 @@ static int cmd_exec(int argc, char **argv)
     return (int)(r.exit_code & 0xFFU);
 }
 
+static void report_transfer(const char *verb, const struct wl_file_result *r)
+{
+    double secs = (double)r->elapsed_ms / 1000.0;
+
+    if (!r->ok) {
+        fprintf(stderr, "w98link: %s failed: %s\n", verb,
+                r->message[0] != '\0' ? r->message : "unknown error");
+        return;
+    }
+    printf("%s %llu bytes in %.1f s", verb, (unsigned long long)r->bytes, secs);
+    if (secs > 0.05)
+        printf(" (%.0f bytes/s)", (double)r->bytes / secs);
+    printf("\n");
+}
+
+static int cmd_transfer(int argc, char **argv, int is_put)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    int force = 0;
+    struct opt opts[] = {
+        {"--line", &line, NULL}, {"--baud", &baud_s, NULL}, {"--force", NULL, &force},
+    };
+    uint32_t baud = DEFAULT_BAUD;
+    struct wl_session_cfg cfg;
+    struct wl_file_result r;
+    struct wl_transport t;
+    char *paths[2];
+    int n_paths;
+    wl_status s;
+
+    n_paths = parse_opts_mixed(argc, argv, opts, sizeof(opts) / sizeof(opts[0]), paths, 2);
+    if (n_paths < 0)
+        return 1;
+    if (n_paths != 2)
+        return usage_error("expects two paths, got", n_paths == 1 ? paths[0] : "none");
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
+        return 1;
+
+    cfg = serial_session(baud);
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    if (is_put)
+        s = wl_client_put(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), paths[0],
+                          paths[1], force, 10000, &r);
+    else
+        s = wl_client_get(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), paths[0],
+                          paths[1], 10000, &r);
+    wl_transport_close(&t);
+    if (s != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    report_transfer(is_put ? "sent" : "received", &r);
+    return r.ok ? 0 : 1;
+}
+
+static int cmd_info(int argc, char **argv)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    struct opt opts[] = {{"--line", &line, NULL}, {"--baud", &baud_s, NULL}};
+    uint32_t baud = DEFAULT_BAUD;
+    static const char *const platforms[] = {"?", "Windows 9x", "Windows NT", "Linux"};
+    struct wl_session_cfg cfg;
+    struct wl_transport t;
+    struct wl_hello h;
+    wl_status s;
+
+    if (parse_all_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
+        return 1;
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
+        return 1;
+    cfg = serial_session(baud);
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    s = wl_client_info(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), 10000, &h);
+    wl_transport_close(&t);
+    if (s != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    printf("agent   %s\n", h.build);
+    printf("platform %s\n", h.platform < 4 ? platforms[h.platform] : "?");
+    printf("protocol %u\n", (unsigned)h.proto);
+    printf("client  %s\n", wl_version());
+    return 0;
+}
+
+static int cmd_put(int argc, char **argv)
+{
+    return cmd_transfer(argc, argv, 1);
+}
+
+static int cmd_get(int argc, char **argv)
+{
+    return cmd_transfer(argc, argv, 0);
+}
+
 struct command {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -421,6 +596,9 @@ struct command {
 
 static const struct command commands[] = {
     {"exec", cmd_exec, help_exec},
+    {"info", cmd_info, help_info},
+    {"put", cmd_put, help_put},
+    {"get", cmd_get, help_get},
     {"echo", cmd_echo, help_echo},
     {"linktest", cmd_linktest, help_linktest},
 };

@@ -24,6 +24,11 @@ struct wl_exec_result {
     struct wl_hello agent;
 };
 
+/* Connects, reads the agent's HELLO and disconnects: what version is over
+ * there, and on what platform. */
+wl_status wl_client_info(struct wl_transport *t, const struct wl_session_cfg *cfg,
+                         uint32_t seed, uint32_t timeout_ms, struct wl_hello *out);
+
 wl_status wl_client_exec(struct wl_transport *t, const struct wl_session_cfg *cfg,
                          uint32_t seed, const char *cmd, const char *cwd, uint8_t flags,
                          const struct wl_exec_io *io, uint32_t connect_timeout_ms,

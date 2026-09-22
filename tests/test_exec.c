@@ -211,6 +211,35 @@ static void test_consecutive_clients(void **state)
     }
 }
 
+/* @stop asks the agent to exit; the launcher on the target then copies a
+ * new binary over it and starts it again. The client must still see the
+ * command succeed. */
+static void test_agent_stop_command(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("@stop", NULL, 0, &r), WL_OK);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+    /* The agent returns on its own, without the test setting the stop flag. */
+    assert_int_equal(pthread_join(agent.th, NULL), 0);
+    assert_int_equal(agent.result, WL_OK);
+    /* teardown joins again, which must not block. */
+    assert_int_equal(pthread_create(&agent.th, NULL, agent_main, &agent), 0);
+    agent.stop = 1;
+}
+
+static void test_unknown_agent_command_is_refused(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("@wat", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_UNKNOWN);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -221,6 +250,9 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_bad_directory_is_refused, setup, teardown),
         cmocka_unit_test_setup_teardown(test_stdin_is_empty, setup, teardown),
         cmocka_unit_test_setup_teardown(test_consecutive_clients, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_agent_stop_command, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_unknown_agent_command_is_refused, setup,
+                                        teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

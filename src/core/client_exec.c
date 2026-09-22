@@ -99,6 +99,63 @@ static void on_error(void *ctx, uint16_t code, const char *msg, size_t n)
     c->phase = PH_FAILED;
 }
 
+struct info_ctx {
+    struct wl_hello *out;
+    int ready;
+    int failed;
+};
+
+static void info_ready(void *ctx, const struct wl_hello *h)
+{
+    struct info_ctx *c = ctx;
+
+    *c->out = *h;
+    c->ready = 1;
+}
+
+static void info_error(void *ctx, uint16_t code, const char *msg, size_t n)
+{
+    struct info_ctx *c = ctx;
+
+    (void)code;
+    (void)msg;
+    (void)n;
+    c->failed = 1;
+}
+
+wl_status wl_client_info(struct wl_transport *t, const struct wl_session_cfg *cfg,
+                         uint32_t seed, uint32_t timeout_ms, struct wl_hello *out)
+{
+    struct info_ctx c;
+    struct wl_peer_handlers h;
+    struct wl_peer *p;
+    uint32_t start = wl_clock_ms();
+    wl_status st = WL_OK;
+
+    memset(out, 0, sizeof(*out));
+    memset(&c, 0, sizeof(c));
+    c.out = out;
+    memset(&h, 0, sizeof(h));
+    h.ctx = &c;
+    h.ready = info_ready;
+    h.error = info_error;
+    p = wl_peer_new(cfg, seed, wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
+    if (p == NULL)
+        return WL_ERR_NOMEM;
+    while (!c.ready && !c.failed && st == WL_OK) {
+        st = wl_peer_pump(p, t, PUMP_MS);
+        if (wl_clock_since(start) >= timeout_ms) {
+            st = wl_fail(WL_ERR_IO, "no answer from the agent within %u s",
+                         (unsigned)(timeout_ms / 1000U));
+            break;
+        }
+    }
+    if (st == WL_OK && c.failed)
+        st = wl_fail(WL_ERR_IO, "the agent refused the connection");
+    wl_peer_free(p);
+    return st;
+}
+
 wl_status wl_client_exec(struct wl_transport *t, const struct wl_session_cfg *cfg,
                          uint32_t seed, const char *cmd, const char *cwd, uint8_t flags,
                          const struct wl_exec_io *io, uint32_t connect_timeout_ms,

@@ -42,6 +42,16 @@ enum {
 };
 #define WL_EXEC_MERGE_STDERR 0x01U
 
+/* PUT and GET channel record types. */
+enum {
+    WL_FILE_DATA = 1,
+    WL_FILE_END = 2,  /* u32 crc32 of the whole file */
+    WL_FILE_DONE = 3, /* written, checked and in place */
+    WL_FILE_FAIL = 4, /* u16 code, str message */
+    WL_FILE_META = 5  /* GET only, from the agent: u64 size, u64 mtime */
+};
+#define WL_PUT_OVERWRITE 0x01U
+
 /* HELLO platform byte. */
 enum { WL_PLATFORM_WIN9X = 1, WL_PLATFORM_WINNT = 2, WL_PLATFORM_LINUX = 3 };
 
@@ -59,6 +69,9 @@ enum {
     WL_E_PATH = 261,
     WL_E_PROCESS = 262
 };
+
+/* The longest path either side will accept, on the wire or on disk. */
+#define WL_PATH_MAX 260U
 
 /* Per-channel flow control (docs/protocol.md, "Flow control"). */
 #define WL_CREDIT_INITIAL 65536U

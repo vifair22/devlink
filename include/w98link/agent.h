@@ -17,6 +17,7 @@
  */
 
 #define WL_AGENT_MAX_EXEC 8U
+#define WL_AGENT_MAX_XFER 4U
 
 struct wl_agent_cfg {
     struct wl_session_cfg session;
