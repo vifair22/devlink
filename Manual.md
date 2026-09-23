@@ -32,6 +32,7 @@ Two programs:
 |---------|---------|---------|
 | `devlink` | Linux | the client: you type commands to it |
 | `DEVLINK.EXE` | Windows 2000 (also NT 4.0 and 98 SE) | the agent: it serves one client at a time |
+| `DEVLINKW.EXE` | Windows 2000 (NT 4.0 and 98 SE untested) | the same agent with a window (section 5) |
 
 Both are built from the same protocol core, so both ends always agree on the
 format. The client always starts the conversation; the agent never calls out.
@@ -45,7 +46,9 @@ What it does:
   usable for development
 
 What it does not do, by design in v1: authentication, encryption, more than
-one client at a time, and resuming an interrupted transfer. See section 10.
+one client on the agent at a time, and resuming an interrupted transfer. See
+section 10. Several commands can still run at once, through the multiplexer on
+this side (section 6, `mux`).
 
 ## 2. Requirements
 
@@ -453,6 +456,102 @@ Connects, prints the agent's build version, platform and protocol version,
 and disconnects. The quickest check that the far end is alive, and the way to
 confirm an update took effect.
 
+### mux
+
+```
+devlink mux [--line PATH] [--baud N] [--idle SECONDS]
+devlink mux --stop [--line PATH]
+```
+
+**The problem it solves.** Every `devlink` command is a process that opens the
+port, handshakes, does one thing and exits. The agent serves one session, so a
+second command starting while a first is still running *displaces* it: the old
+session dies and everything it was running is killed. Run `devlink exec` in one
+terminal and `devlink put` in another and the first one's command is gone. That
+has cost a real installation part-way through.
+
+The multiplexer fixes this without any change to the agent or the wire. One
+process owns the port and keeps a single session; every other command reaches
+the agent through a Unix socket and is given a channel of its own. The protocol
+already multiplexed, with per-channel credit and round-robin between channels;
+what was missing was only that each command was its own process.
+
+Two things come free with it. The per-command handshake disappears, and so
+does the per-command compression stream, so the deflate context survives across
+commands instead of restarting from nothing on a line where it is the scarce
+resource.
+
+**Turning it on.** Set `DEVLINK_MUX=1` in the shell you want it in:
+
+```sh
+export DEVLINK_MUX=1
+devlink exec dir            # starts the multiplexer if it is not running
+```
+
+It is off by default, deliberately. Starting a multiplexer opens a session of
+its own, which displaces whatever session is on the line - exactly the thing it
+exists to prevent. On a line somebody else is already using, turning it on kills
+what they were running. It defaulted to on once, and rebuilding the binary
+changed how an already-running workflow reached the agent and broke it. A build
+that changes behaviour under a running workflow is a trap however good the
+behaviour, so this is a decision you make once, per shell, rather than one that
+is made for you.
+
+`echo` and `linktest` ignore it and always take the port directly: they test the
+cable rather than talk to the agent.
+
+**Starting and stopping.** A command that needs it starts it, so `devlink mux`
+is rarely typed. It exits by itself after `--idle` seconds with nobody
+connected, 600 by default, so a forgotten one does not hold the port for ever.
+`devlink mux --stop` ends it at once.
+
+**Where its files are.** In `$XDG_RUNTIME_DIR`, or `/tmp` if that is unset:
+
+| file | |
+|------|--|
+| `devlink-<device>.sock` | the socket commands connect to |
+| `devlink-<device>.sock.pid` | the running multiplexer's pid, for `--stop` |
+| `devlink-<device>.sock.log` | its log, since an autostarted one has no terminal |
+
+`<device>` is the name the line *resolves* to, not the path you typed. One cable
+has several names, `/dev/ttyUSB0` and the `/dev/serial/by-id` link that points at
+it, and naming the socket after each of them gave two sockets and therefore two
+multiplexers, the second of which could not open the port. Either name now
+reaches the same one.
+
+The log is the first place to look when something is odd. It records each
+client connecting and leaving, each session on the line, and the number of
+channels held, which should return to zero between commands.
+
+**What it deliberately does not do.** A channel dies with its client. Ctrl-C or
+a closed terminal kills the remote command exactly as it does without the
+multiplexer. It gives concurrency, not detachment: keeping a command alive
+across a client exiting would need job ids and a registry, which is a different
+feature and was turned down when it was considered.
+
+**What it costs.** A bulk `put` and an interactive `exec` sharing 11 KB/s means
+the `exec` feels slow. Round-robin makes that fair rather than starved; there is
+no per-channel priority, which is a later question if it turns out to matter.
+
+**Limits.** Eight connected clients and twelve relayed channels at once. In
+normal use a command is one client holding one channel, so the client limit is
+the one you would meet first. The channel limit is slightly below what the
+agent itself can hold, which is eight commands, four transfers and a sync, or
+thirteen; reaching that through the multiplexer would need more channels than
+it has clients, so it is a corner rather than a ceiling you would find by
+working.
+
+**When the port is busy.** Only one thing can hold the line. Anything else
+trying to open it is refused with the holder named:
+
+```
+devlink: serial: /dev/ttyUSB0 is already in use (held by pid 405167, devlink);
+wait for it to finish
+```
+
+The pid named is the one holding the lock, not merely one with the device open,
+which matters when something else is passing bytes through the same port.
+
 ### echo and linktest
 
 Diagnostics; see section 9.
@@ -627,8 +726,15 @@ Kermit session started by hand is not covered; `flock -n` around such a script
 is the way to include it.
 
 **One client at a time.** A second client's connection displaces the first,
-whose commands are then killed. This is deliberate: it is how a restarted
-client recovers from an abandoned session.
+whose commands are then killed. This is deliberate at the agent: it is how a
+restarted client recovers from an abandoned session, with no state left to
+reconcile.
+
+It is also why the multiplexer exists. With `DEVLINK_MUX=1` one process holds
+the single session and hands every command a channel of it, so several
+commands run at once without any of them displacing another (section 6,
+`mux`). The agent's rule is unchanged; what changes is that only one thing on
+this side is a client.
 
 **Interrupted transfers do not resume.** They fail, and nothing is left
 half-written; run the command again.
