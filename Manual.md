@@ -244,6 +244,9 @@ side; split the line three times and stop. Entries are in directory order, not
 sorted, and `.` and `..` are left out. A path that cannot be listed fails with
 status 125 and a message rather than printing nothing.
 
+`@time` reads the target's clock, and `@time set SECONDS` sets it. Use the
+client's `time` command rather than this directly.
+
 `@caps` reports what the serial port underneath can do, asked of the open
 handle so nothing is changed:
 
@@ -270,6 +273,48 @@ exact byte sizes, a machine-readable time instead of a locale-formatted one, a
 real exit status, no volume header or free-space footer, and about half the
 time (97 ms against 182 ms on the A21m). Use `dir` when you want the DOS
 report; use `@dir` when something on this side has to read it.
+
+### time
+
+```
+w98link time [--line PATH] [--baud N] [--set]
+```
+
+Compares the two clocks, and with `--set` corrects the target's from this one.
+
+```
+$ w98link time
+workstation 2026-09-23 05:20:11 UTC
+target      2026-09-23 05:17:43 UTC
+difference  2 m 28 s behind
+target tz   UTC+0:00
+round trip  47 ms
+
+run 'w98link time --set' to correct it; sync compares file times
+```
+
+**Why this matters more than it looks.** `sync` decides what to send by
+comparing modification times, so a target whose clock is wrong either resends a
+whole tree every time or, if its clock runs ahead, writes files that look newer
+than the originals and then misses real changes. The A21m's RTC drifts minutes a
+day, and a machine whose CMOS battery has died starts somewhere in the last
+century, so this is worth running after every boot until the battery is
+replaced.
+
+**What is set is UTC**, not local time. The protocol's file times are UTC, so
+that is what has to be right; if the target's time zone is set wrongly its
+clock will read wrong on screen while everything the link does stays correct.
+The reported `target tz` is there to show you that separately.
+
+**Accuracy** is within the round trip, tens of milliseconds on a serial line,
+against a two-second tolerance in `sync` for FAT's timestamp resolution. No
+correction for latency is applied, because none is needed at that ratio.
+
+Setting the clock while a session is running is safe. The link's timers are
+monotonic, not wall clock, which is exactly what was not true of Kermit: moving
+the clock under Kermit killed the session, and that is why this project's
+earlier notes say never to change the time mid-transfer. That caveat no longer
+applies.
 
 ### put and get
 

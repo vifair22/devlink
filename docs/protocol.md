@@ -311,6 +311,17 @@ Unknown `@` commands are refused with OPEN_FAIL. v1 has two:
   `..` are left out. A path that cannot be listed is refused with OPEN_FAIL
   and code 256 rather than producing an empty listing.
 
+- `@time` reports the agent's wall clock as `utc SECONDS` and its local offset
+  as `localoffset MINUTES`, both as STDOUT records then EXIT 0. `@time set
+  SECONDS` sets the clock to that UTC value first, and is refused with
+  OPEN_FAIL and code 257 where the platform will not allow it. UTC is what is
+  set, not local time, because the protocol's file times are UTC and `sync`
+  compares them.
+
+  Setting the clock mid-session is safe: the link's timers are monotonic
+  (`GetTickCount` on the target), not wall clock. This is what could not be
+  done over Kermit, whose session died when the clock moved.
+
 - `@caps` reports what the port the agent is serving on can be set to, as
   STDOUT records then EXIT 0, one `name value` per line: the current settings,
   the driver's maximum and settable rates, its buffer sizes. It asks the open

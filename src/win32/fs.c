@@ -4,26 +4,8 @@
 
 #include "w98link/fs.h"
 #include "w98link/proto.h"
+#include "wintime.h"
 
-/* FILETIME counts 100 ns units from 1601-01-01; this is the gap to the Unix
- * epoch in those units. */
-#define EPOCH_DELTA 116444736000000000ULL
-#define PER_SECOND 10000000ULL
-
-static uint64_t ft_to_unix(const FILETIME *ft)
-{
-    uint64_t t = ((uint64_t)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
-
-    return t < EPOCH_DELTA ? 0 : (t - EPOCH_DELTA) / PER_SECOND;
-}
-
-static void unix_to_ft(uint64_t secs, FILETIME *ft)
-{
-    uint64_t t = (secs * PER_SECOND) + EPOCH_DELTA;
-
-    ft->dwLowDateTime = (DWORD)(t & 0xFFFFFFFFU);
-    ft->dwHighDateTime = (DWORD)(t >> 32);
-}
 
 wl_status wl_fs_stat(const char *path, uint64_t *size, uint64_t *mtime, int *is_dir)
 {
@@ -34,7 +16,7 @@ wl_status wl_fs_stat(const char *path, uint64_t *size, uint64_t *mtime, int *is_
         return wl_fail(WL_ERR_IO, "%s: not found (%lu)", path, GetLastError());
     FindClose(h);
     *size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
-    *mtime = ft_to_unix(&fd.ftLastWriteTime);
+    *mtime = wl_ft_to_unix(&fd.ftLastWriteTime);
     *is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     return WL_OK;
 }
@@ -48,7 +30,7 @@ wl_status wl_fs_set_mtime(const char *path, uint64_t mtime)
     if (h == INVALID_HANDLE_VALUE)
         return wl_fail(WL_ERR_IO, "%s: cannot open to set its time (%lu)", path,
                        GetLastError());
-    unix_to_ft(mtime, &ft);
+    wl_unix_to_ft(mtime, &ft);
     /* Win9x keeps FAT times in local time and converts here, so the value
      * seen by DOS matches the machine's clock, which is what sync needs. */
     if (!SetFileTime(h, NULL, NULL, &ft)) {
@@ -154,7 +136,7 @@ static wl_status walk_dir(char *full, size_t full_len, char *rel, size_t rel_len
         } else {
             uint64_t size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
 
-            if (!cb(ctx, rel, size, ft_to_unix(&fd.ftLastWriteTime)))
+            if (!cb(ctx, rel, size, wl_ft_to_unix(&fd.ftLastWriteTime)))
                 *stop = 1;
         }
     } while (!*stop && st == WL_OK && FindNextFileA(h, &fd));
@@ -255,7 +237,7 @@ wl_status wl_fs_list(const char *path, wl_fs_list_cb cb, void *ctx)
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
             size = 0;
         if (!cb(ctx, fd.cFileName, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
-                size, ft_to_unix(&fd.ftLastWriteTime)))
+                size, wl_ft_to_unix(&fd.ftLastWriteTime)))
             stop = 1;
     } while (!stop && FindNextFileA(h, &fd));
     FindClose(h);

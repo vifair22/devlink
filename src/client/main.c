@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "w98link/client_exec.h"
@@ -31,6 +32,7 @@ static const char *const help_main =
     "  get       copy a file from the agent\n"
     "  sync      copy a directory to the agent, sending only what differs\n"
     "  info      show the agent's version and platform\n"
+    "  time      compare the agent's clock with this one, or set it\n"
     "  echo      test the cable and ports against 'W98AGENT echo'\n"
     "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
     "\n"
@@ -75,6 +77,18 @@ static const char *const help_info =
     "\n"
     "Connects to the agent, prints what it reports about itself, and\n"
     "disconnects.\n";
+
+static const char *const help_time =
+    "usage: w98link time [--line PATH] [--baud N] [--set]\n"
+    "\n"
+    "Compares the agent's clock with this one and reports the difference.\n"
+    "With --set, sets the agent's clock from this machine's first, then\n"
+    "reports what is left. UTC is what is set, whatever time zone the target\n"
+    "believes it is in.\n"
+    "\n"
+    "Worth doing before a sync: sync decides what to send by comparing\n"
+    "modification times, so a target clock that is wrong makes it resend a\n"
+    "whole tree or, worse, miss changes.\n";
 
 static const char *const help_put =
     "usage: w98link put [--line PATH] [--baud N] [--force] LOCAL REMOTE\n"
@@ -687,6 +701,160 @@ static int cmd_info(int argc, char **argv)
     return 0;
 }
 
+/* Collects the agent's reply to an @ command, which is a few short lines. */
+struct reply {
+    char text[512];
+    size_t len;
+};
+
+static void reply_output(void *ctx, uint8_t stream, const uint8_t *p, size_t n)
+{
+    struct reply *r = ctx;
+
+    if (stream != WL_EXEC_STDOUT)
+        return;
+    if (n > sizeof(r->text) - 1 - r->len)
+        n = sizeof(r->text) - 1 - r->len;
+    memcpy(r->text + r->len, p, n);
+    r->len += n;
+    r->text[r->len] = '\0';
+}
+
+/* Reads "name <number>" out of the agent's reply. */
+static int reply_number(const struct reply *r, const char *name, long long *out)
+{
+    const char *at = strstr(r->text, name);
+
+    if (at == NULL)
+        return 0;
+    at += strlen(name);
+    while (*at == ' ')
+        at++;
+    if (*at != '-' && (*at < '0' || *at > '9'))
+        return 0;
+    *out = strtoll(at, NULL, 10);
+    return 1;
+}
+
+/* Asks the agent one @ command and hands back what it said. */
+static int ask_agent(struct wl_transport *t, const struct wl_session_cfg *cfg,
+                     const char *cmd, struct reply *out)
+{
+    struct wl_exec_io io = {out, reply_output, NULL};
+    struct wl_exec_result r;
+
+    memset(out, 0, sizeof(*out));
+    if (wl_client_exec(t, cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), cmd, NULL, 0,
+                       &io, 10000, &r) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 0;
+    }
+    if (!r.ran || r.exit_code != 0) {
+        fprintf(stderr, "w98link: %s\n", r.message[0] != '\0' ? r.message : "the agent refused");
+        return 0;
+    }
+    return 1;
+}
+
+static void print_gmtime(const char *label, long long secs)
+{
+    time_t t = (time_t)secs;
+    struct tm tm;
+    char when[32] = "?";
+
+    if (gmtime_r(&t, &tm) != NULL)
+        (void)strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
+    printf("%-11s %s UTC\n", label, when);
+}
+
+/* "2 m 28 s behind", from the target's point of view. */
+static void print_difference(long long delta)
+{
+    long long mag = delta < 0 ? -delta : delta;
+
+    if (delta == 0) {
+        printf("difference  none\n");
+        return;
+    }
+    printf("difference  ");
+    if (mag >= 86400)
+        printf("%lld d ", mag / 86400);
+    if (mag >= 3600)
+        printf("%lld h ", (mag % 86400) / 3600);
+    if (mag >= 60)
+        printf("%lld m ", (mag % 3600) / 60);
+    printf("%lld s %s\n", mag % 60, delta < 0 ? "behind" : "ahead");
+}
+
+static int cmd_time(int argc, char **argv)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    int set = 0;
+    struct opt opts[] = {
+        {"--line", &line, NULL},
+        {"--baud", &baud_s, NULL},
+        {"--set", NULL, &set},
+    };
+    uint32_t baud = DEFAULT_BAUD;
+    struct wl_session_cfg cfg;
+    struct wl_transport t;
+    struct reply reply;
+    uint64_t here = 0;
+    long long there = 0;
+    long long offset = 0;
+    uint32_t rtt;
+
+    if (parse_all_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
+        return 1;
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
+        return 1;
+    cfg = serial_session(baud);
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+
+    if (set) {
+        char cmd[64];
+
+        (void)wl_clock_utc(&here);
+        sprintf(cmd, "@time set %llu", (unsigned long long)here);
+        if (!ask_agent(&t, &cfg, cmd, &reply)) {
+            wl_transport_close(&t);
+            return 1;
+        }
+    }
+    /* Timed, because the reply is as old as half the round trip; on this line
+     * that is tens of milliseconds, far inside what matters here, and saying
+     * so is better than implying the comparison is exact. */
+    rtt = wl_clock_ms();
+    if (!ask_agent(&t, &cfg, "@time", &reply)) {
+        wl_transport_close(&t);
+        return 1;
+    }
+    rtt = wl_clock_since(rtt);
+    wl_transport_close(&t);
+    (void)wl_clock_utc(&here);
+    if (!reply_number(&reply, "utc", &there)) {
+        fprintf(stderr, "w98link: the agent did not report a time\n");
+        return 1;
+    }
+    (void)reply_number(&reply, "localoffset", &offset);
+
+    print_gmtime("workstation", (long long)here);
+    print_gmtime("target", there);
+    print_difference(there - (long long)here);
+    printf("target tz   UTC%+lld:%02lld\n", offset / 60,
+           (offset < 0 ? -offset : offset) % 60);
+    printf("round trip  %u ms\n", (unsigned)rtt);
+    if (!set && (there - (long long)here > 2 || (long long)here - there > 2))
+        printf("\nrun 'w98link time --set' to correct it; sync compares file times\n");
+    return 0;
+}
+
 static int cmd_put(int argc, char **argv)
 {
     return cmd_transfer(argc, argv, 1);
@@ -707,6 +875,7 @@ static const struct command commands[] = {
     {"exec", cmd_exec, help_exec},
     {"sync", cmd_sync, help_sync},
     {"info", cmd_info, help_info},
+    {"time", cmd_time, help_time},
     {"put", cmd_put, help_put},
     {"get", cmd_get, help_get},
     {"echo", cmd_echo, help_echo},
