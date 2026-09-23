@@ -88,6 +88,37 @@ static void test_open_failures(void **state)
     assert_int_equal(wl_serial_open("/dev/null", 115200, &t), WL_ERR_IO);
 }
 
+/*
+ * One user of the line at a time. This is not politeness: the agent serves one
+ * client, and a second client displaces the first, killing whatever command
+ * was running on the target. It cost somebody an install once.
+ *
+ * flock is held per open file description, so a second open in this same
+ * process is refused exactly as another program's would be.
+ */
+static void test_a_second_open_of_the_same_port_is_refused(void **state)
+{
+    struct wl_transport first;
+    struct wl_transport second;
+    char name[128];
+    int master;
+    int slave;
+
+    (void)state;
+    assert_int_equal(openpty(&master, &slave, name, NULL, NULL), 0);
+    assert_int_equal(wl_serial_open(name, 115200, &first), WL_OK);
+    assert_int_equal(wl_serial_open(name, 115200, &second), WL_ERR_IO);
+    assert_non_null(strstr(wl_error(), "already in use"));
+
+    /* And it is available again once the first user lets go, with no lock file
+     * left behind to clean up. */
+    wl_transport_close(&first);
+    assert_int_equal(wl_serial_open(name, 115200, &second), WL_OK);
+    wl_transport_close(&second);
+    (void)close(slave);
+    (void)close(master);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -95,6 +126,7 @@ int main(void)
         cmocka_unit_test(test_read_timeout_is_not_an_error),
         cmocka_unit_test(test_peer_close_is_an_error),
         cmocka_unit_test(test_open_failures),
+        cmocka_unit_test(test_a_second_open_of_the_same_port_is_refused),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

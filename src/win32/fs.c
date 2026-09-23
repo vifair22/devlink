@@ -31,8 +31,10 @@ wl_status wl_fs_set_mtime(const char *path, uint64_t mtime)
         return wl_fail(WL_ERR_IO, "%s: cannot open to set its time (%lu)", path,
                        GetLastError());
     wl_unix_to_ft(mtime, &ft);
-    /* Win9x keeps FAT times in local time and converts here, so the value
-     * seen by DOS matches the machine's clock, which is what sync needs. */
+    /* The value handed over is UTC, which is what NTFS stores. On a FAT volume
+     * Windows converts to local time on the way down and back on the way up,
+     * so what sync compares is UTC either way; the two-second tolerance in
+     * proto.h is for FAT's timestamp resolution, not for that conversion. */
     if (!SetFileTime(h, NULL, NULL, &ft)) {
         wl_status s = wl_fail(WL_ERR_IO, "%s: SetFileTime failed (%lu)", path, GetLastError());
 
@@ -43,11 +45,36 @@ wl_status wl_fs_set_mtime(const char *path, uint64_t mtime)
     return WL_OK;
 }
 
+typedef BOOL(WINAPI *move_file_ex_fn)(LPCSTR, LPCSTR, DWORD);
+
+/*
+ * MoveFileEx with MOVEFILE_REPLACE_EXISTING replaces a file in one step. It
+ * is resolved at run time because Win9x does not implement it, and there the
+ * old file has to be deleted first, leaving a moment with nothing at the
+ * destination: a put or sync interrupted in that gap takes the file the target
+ * already had with it. On NT that gap is closed.
+ *
+ * Where MoveFileEx exists its failure is reported rather than retried with the
+ * pair below. Falling back would mean answering "the destination is locked" by
+ * deleting the destination.
+ */
 wl_status wl_fs_replace(const char *from, const char *to)
 {
-    /* MoveFileEx with MOVEFILE_REPLACE_EXISTING is NT-only, and MoveFile
-     * refuses an existing destination, so the old file goes first. The gap
-     * is unavoidable on Win9x. */
+    static move_file_ex_fn move_ex;
+    static int resolved;
+
+    if (!resolved) {
+        HMODULE k32 = GetModuleHandleA("kernel32.dll");
+
+        if (k32 != NULL)
+            move_ex = (move_file_ex_fn)GetProcAddress(k32, "MoveFileExA");
+        resolved = 1;
+    }
+    if (move_ex != NULL) {
+        if (!move_ex(from, to, MOVEFILE_REPLACE_EXISTING))
+            return wl_fail(WL_ERR_IO, "cannot replace %s (%lu)", to, GetLastError());
+        return WL_OK;
+    }
     (void)DeleteFileA(to);
     if (!MoveFileA(from, to))
         return wl_fail(WL_ERR_IO, "cannot rename to %s (%lu)", to, GetLastError());

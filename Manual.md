@@ -498,6 +498,7 @@ W98LINK_DEBUG=1 w98link sync ./src C:/SRC/src
 | "Bad command or file name" from a batch file | the file was copied by something that doubled its carriage returns. Copy it with `put`, which is byte-exact |
 | A command's exit status is always 0 | the command went through `command.com`; see section 10 |
 | The agent will not start: "cannot open COM1" | another program holds the port |
+| `serial: ... is already in use (held by pid N, name)` | another client has the line; wait for it. One at a time is deliberate, see section 10 |
 | `drive D: is not ready` | the command named a drive with no media in it; the agent refused it rather than letting DOS freeze (section 10) |
 | A command prints `Abort, Retry, Fail?` and never returns | DOS reached empty media by a route the drive check could not see. Nothing on the client can help: answer the prompt at the target, or end the DOS task there. See section 10 |
 | Everything stalls, then recovers after ten seconds | the link declared the peer dead and resynchronised; look for a loose connector |
@@ -553,6 +554,19 @@ Paths may be up to 259 characters. Long file names work; case is preserved.
 **No authentication or encryption.** Anyone who can reach the port can run
 commands as whoever started the agent. Over a cable that is the person at the
 keyboard. This matters more when the TCP transport arrives.
+
+**The line is locked while a client holds it.** Opening the port takes an
+exclusive `flock` on it, and a second client is refused with the pid and name
+of the one that has it. This is not politeness about a shared device: the agent
+serves one client, and a new client *displaces* the old session, so a second
+client killed whatever command was running on the target. That has cost a
+running install.
+
+The lock lives on the descriptor, not in `/var/lock`, which is root-only here
+and would need stale locks cleaning up; the kernel releases this one however
+the process exits, including a kill. It only binds programs that take it, so a
+Kermit session started by hand is not covered; `flock -n` around such a script
+is the way to include it.
 
 **One client at a time.** A second client's connection displaces the first,
 whose commands are then killed. This is deliberate: it is how a restarted

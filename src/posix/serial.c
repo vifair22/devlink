@@ -1,9 +1,12 @@
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -128,6 +131,85 @@ static int baud_to_speed(uint32_t baud, speed_t *out)
     return 0;
 }
 
+/*
+ * Names whoever else has the port open, for the message. Best effort: it walks
+ * /proc looking for a descriptor on the same character device, and says nothing
+ * if it cannot tell. Comparing device numbers rather than paths is what makes
+ * it work through /dev/serial/by-id symlinks.
+ */
+static void name_the_holder(const char *path, char *out, size_t cap)
+{
+    struct stat want;
+    DIR *proc;
+    struct dirent *e;
+
+    out[0] = '\0';
+    if (stat(path, &want) != 0 || !S_ISCHR(want.st_mode))
+        return;
+    proc = opendir("/proc");
+    if (proc == NULL)
+        return;
+    while ((e = readdir(proc)) != NULL && out[0] == '\0') {
+        char dir[286]; /* /proc/<pid>/fd, with room for any pid */
+        DIR *fds;
+        struct dirent *f;
+
+        if (e->d_name[0] < '1' || e->d_name[0] > '9')
+            continue;
+        if (snprintf(dir, sizeof(dir), "/proc/%s/fd", e->d_name) >= (int)sizeof(dir))
+            continue;
+        fds = opendir(dir);
+        if (fds == NULL)
+            continue; /* not ours to look at, which is fine */
+        while ((f = readdir(fds)) != NULL) {
+            char full[556];
+            struct stat got;
+
+            if (f->d_name[0] == '.')
+                continue;
+            if (snprintf(full, sizeof(full), "%s/%s", dir, f->d_name) >= (int)sizeof(full))
+                continue;
+            if (stat(full, &got) != 0 || !S_ISCHR(got.st_mode) || got.st_rdev != want.st_rdev)
+                continue;
+            if ((int)strtol(e->d_name, NULL, 10) == getpid())
+                continue;
+            {
+                char comm[64] = "";
+                char commpath[286];
+                FILE *cf;
+
+                (void)snprintf(commpath, sizeof(commpath), "/proc/%s/comm", e->d_name);
+                cf = fopen(commpath, "r");
+                if (cf != NULL) {
+                    if (fgets(comm, (int)sizeof(comm), cf) != NULL) {
+                        size_t n = strlen(comm);
+
+                        while (n > 0 && (comm[n - 1] == '\n' || comm[n - 1] == '\r'))
+                            comm[--n] = '\0';
+                    }
+                    (void)fclose(cf);
+                }
+                char pid[16];
+
+                size_t k;
+
+                /* Copied by hand rather than with snprintf: this is a pid, but
+                 * the compiler only knows it is a directory name, and any
+                 * formatted copy of one into a small buffer is a truncation
+                 * warning the strict flags refuse. */
+                for (k = 0; k + 1 < sizeof(pid) && e->d_name[k] != '\0'; k++)
+                    pid[k] = e->d_name[k];
+                pid[k] = '\0';
+                (void)snprintf(out, cap, " (held by pid %s%s%s)", pid,
+                               comm[0] != '\0' ? ", " : "", comm);
+            }
+            break;
+        }
+        (void)closedir(fds);
+    }
+    (void)closedir(proc);
+}
+
 wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *out)
 {
     struct termios tio;
@@ -143,6 +225,28 @@ wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *o
     fd = open(path, O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (fd < 0)
         return wl_fail(WL_ERR_IO, "serial: open %s: %s", path, strerror(errno));
+
+    /*
+     * One user of the line at a time. Nothing in the operating system enforces
+     * this for a serial port, and the consequence is not two programs politely
+     * interleaving: the agent serves one client and a second client displaces
+     * the first, so a command already running on the target is killed. That
+     * has happened, to somebody's install.
+     *
+     * flock on the descriptor rather than a file in /var/lock, which is
+     * root-only here, and which would need stale locks cleaned up. The kernel
+     * drops this one when the process exits, however it exits.
+     */
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        char who[160];
+        wl_status st;
+
+        name_the_holder(path, who, sizeof(who));
+        st = wl_fail(WL_ERR_IO, "serial: %s is already in use%s; wait for it to finish",
+                     path, who);
+        (void)close(fd);
+        return st;
+    }
 
     if (tcgetattr(fd, &tio) != 0) {
         wl_status st = wl_fail(WL_ERR_IO, "serial: tcgetattr %s: %s", path, strerror(errno));

@@ -35,25 +35,40 @@ measured on 98 stays recorded in `Manual.md` section 10 and
 `docs/bug-critical-error-hang.md`, because it explains why the code looks the
 way it does.
 
-What 2000 makes available, for iteration 10 (each needs a runtime check or
-GetProcAddress, so the binary still starts on 98):
+What 2000 made available, and what came of each. Anything kept has a runtime
+check or a GetProcAddress, so one binary still starts on 98.
 
-- `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`, so `put` and `sync` replace a file
-  in one step instead of remove-then-rename, which today leaves a window where
-  neither the old nor the new file is in place.
-- `SetHandleInformation`, replacing the `DuplicateHandle` dance that
-  un-inherits the parent's pipe ends in `src/win32/proc.c`.
-- Overlapped I/O on pipes, which would collapse the thread-per-pipe reader
-  design into one waiter. Worth it only if the threads actually cause trouble.
-- NTFS timestamps are UTC with 100 ns resolution, so the FAT local-time
-  conversion and `WL_MTIME_SLACK` become unnecessary there. They must stay for
-  FAT volumes, which 2000 still mounts.
-- `cmd.exe` returns real exit codes, so the "run it directly when it has no
-  metacharacters" rule in `wl_proc_start` stops being load-bearing. Keep it:
-  it is still one fewer process.
-- Possibly a faster line. Win9x's serial driver caps usefully at 115200; NT's
-  will set higher rates on a 16550A, and the FTDI end has no trouble. Worth
-  measuring before the NIC arrives, since it is free throughput.
+- **`MoveFileEx(MOVEFILE_REPLACE_EXISTING)`: done.** `put` and `sync` replace a
+  file in one step on NT instead of remove-then-rename, which left a moment
+  with nothing at the destination; an interrupted transfer there took the file
+  the target already had with it. Resolved through GetProcAddress, with the old
+  pair kept for 98. Where MoveFileEx exists, its failure is reported rather
+  than retried with the pair: falling back would answer "the destination is
+  locked" by deleting the destination.
+- **`SetHandleInformation`: declined.** It would replace a working
+  `DuplicateHandle` that runs on both platforms with a GetProcAddress, a second
+  code path and the same behaviour. That is more code to read, not less. The
+  note that prompted this said SetHandleInformation "would be simpler", which
+  is true only if 98 is dropped, and it is not.
+- **Overlapped I/O on pipes: declined for now.** It would collapse the
+  thread-per-pipe readers into one waiter, which is a real simplification, but
+  the threads cause no trouble: the case that used to hurt, a reader that will
+  not come back, is handled by the reaper. Revisit only if something concrete
+  argues for it.
+- **`WL_MTIME_SLACK`: kept.** NTFS timestamps are UTC with 100 ns resolution,
+  so exact comparison would work there, but the two-second tolerance costs
+  nothing and the target may be mounting FAT volumes, where it is required.
+  Removing it would buy accuracy nobody asked for at the price of false
+  "changed" verdicts on a FAT drive.
+- **`cmd.exe` exit codes: verified on the target.** `exit 3` returns 3 and a
+  pipe still reports honestly, where 98 always said 0. The "run it directly
+  when it has no metacharacters" rule in `wl_proc_start` stops being
+  load-bearing but stays: it is still one fewer process.
+- **A faster line: no.** `@caps` on the A21m reports a settable list stopping
+  at 115200 with BAUD_USER after it, so the driver promises no ceiling and only
+  answers for a specific rate. The arithmetic decides: 1.8432 MHz over 16 is
+  exactly 115200 at a divisor of 1, the smallest a 16550 has, so 230400 would
+  need half a divisor. 115200 is the hardware ceiling here.
 
 The agent targets Win32 as shipped in Windows NT 4.0+ (2000, XP) and, without
 active work, Windows 98 SE. Watcom's `-bt=nt` output runs on all of them, so
