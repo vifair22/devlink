@@ -235,8 +235,28 @@ analyze:
 	done
 	@$(PYTHON) tools/check_stack.py $(BUILD_DIR)/stack
 
+# The Win32 half is linted too, against mingw-w64's headers: clang cannot
+# parse windows.h otherwise, which is how half the shipped agent went
+# unchecked until a stray identical-branch if in wl_fs_list turned up in an
+# editor. It is read with mingw's declarations and built with Watcom's, so a
+# finding here is about our code, not about which header set is in use; the
+# one flag this costs is documented in .clangd. Skipped with a notice when no
+# mingw headers are installed, since it must not stop the gate on a machine
+# that has none.
+WIN_TIDY_DIRS := /usr/i686-w64-mingw32/include /usr/i686-w64-mingw32/usr/include \
+                 /usr/local/i686-w64-mingw32/include
+WIN_TIDY_INC  := $(foreach d,$(WIN_TIDY_DIRS),$(if $(wildcard $(d)),-isystem $(d)))
+
 tidy:
 	@clang-tidy $(NATIVE_SOURCES) -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -std=c11
+	@if [ -z "$(WIN_TIDY_INC)" ]; then \
+	    echo "== win32: skipped, no mingw-w64 headers found (install them to lint it)"; \
+	else \
+	    echo "== win32"; \
+	    clang-tidy $(AGENT_SOURCES) -- --target=i686-w64-mingw32 $(WIN_TIDY_INC) \
+	        -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_WIN32_WINNT=0x0500 -DVARIANT=tidy \
+	        -DW98LINK_VERSION='"0.0.0_tidy"' -std=c11 -Wno-cast-qual; \
+	fi
 
 # ---------------------------------------------------------------------------
 # housekeeping

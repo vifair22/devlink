@@ -237,11 +237,10 @@ wl_status wl_fs_list(const char *path, wl_fs_list_cb cb, void *ctx)
     memcpy(pattern, path, n);
     while (n > 1 && (pattern[n - 1] == '\\' || pattern[n - 1] == '/'))
         n--;
-    /* A bare drive root is "C:", where the separator is not optional. */
-    if (n == 2 && pattern[1] == ':')
-        pattern[n++] = '\\';
-    else
-        pattern[n++] = '\\';
+    /* The separator goes back on unconditionally: a trailing one was just
+     * stripped, and a bare drive root ("C:") needs one that was never there,
+     * since "C:*" means the current directory of that drive. */
+    pattern[n++] = '\\';
     pattern[n++] = '*';
     pattern[n] = '\0';
     h = FindFirstFileA(pattern, &fd);

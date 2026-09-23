@@ -36,6 +36,13 @@ Working name only; the project will be renamed.
 Requirements: gcc, make, cmocka, gcovr, cppcheck, clang-tidy, and Open Watcom
 v2 for the agent (unpacked at `~/.local/opt/watcom`, or set `WATCOM=`).
 
+For reading the code, mingw-w64's headers as well: nothing is built with them,
+but they are what lets clangd, an editor and `make tidy` parse `src/win32/`,
+which no Linux compiler can do with windows.h absent. `compile_flags.txt` and
+`.clangd` between them describe the whole tree, so every file should open
+without errors. `make tidy` says so when it skips the Win32 half for want of
+those headers.
+
 ```sh
 make            # Linux client -> build/bin/w98link
 make win98      # Win98 agent  -> build/bin/W98AGENT.EXE
@@ -44,6 +51,7 @@ make dist       # agent + launcher + README, staged for the target
 make test       # cmocka suite
 make coverage   # line coverage, gated at 80%
 make analyze    # cppcheck, gcc -fanalyzer, stack usage
+make tidy       # clang-tidy, including the Win32 agent sources
 make help       # everything else
 ```
 

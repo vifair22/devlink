@@ -1,5 +1,30 @@
+# Flags for clangd, clang-tidy and anything else reading a file on its own.
+# These mirror the Makefile's CPPFLAGS_COMMON and warning set so an editor
+# reports what a build would, minus -Werror (an editor should point at a
+# problem, not refuse to show the file) and minus the hardening flags, which
+# change code generation and not diagnostics.
+#
+# This file applies to every file in the repo. The per-directory differences
+# that cannot be expressed here, above all that src/win32 needs Windows
+# headers, live in .clangd next to it.
 -Iinclude
+-isystem
+third_party/zlib
 -std=c11
 -D_GNU_SOURCE
+-DW98LINK_VERSION="0.0.0_editor"
 -Wall
 -Wextra
+-Wpedantic
+-Wshadow
+-Wunused
+-Wdouble-promotion
+-Wformat=2
+-Wmissing-prototypes
+-Wstrict-prototypes
+-Wmissing-declarations
+-Wcast-align
+-Wcast-qual
+-Wnull-dereference
+-Wconversion
+-Wsign-conversion

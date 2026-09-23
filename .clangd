@@ -1,0 +1,52 @@
+# clangd configuration. compile_flags.txt holds what every file needs; this
+# holds the per-directory differences.
+
+---
+# The agent's platform half is Win32 source that no Linux compiler can parse
+# with the default flags: windows.h is not there, and without it every line of
+# these files is an error, which is how an editor ends up unable to show them
+# at all. mingw-w64's headers describe the same API, so pointing clangd at
+# them makes the files readable and their diagnostics real. The agent is built
+# with Open Watcom, not mingw; this affects reading only.
+#
+# Several include paths are listed because distributions disagree about where
+# they go (Arch: /usr/i686-w64-mingw32/include, Gentoo crossdev:
+# /usr/i686-w64-mingw32/usr/include). clang ignores an -isystem directory that
+# does not exist, so listing all of them costs nothing and one file serves
+# every machine. If none is present, install mingw-w64 headers for the target.
+#
+# _WIN32_WINNT=0x0500 is Windows 2000, the current target.
+If:
+  PathMatch: [src/win32/.*, src/agent/.*]
+CompileFlags:
+  Add:
+    - --target=i686-w64-mingw32
+    - -isystem
+    - /usr/i686-w64-mingw32/include
+    - -isystem
+    - /usr/i686-w64-mingw32/usr/include
+    - -isystem
+    - /usr/local/i686-w64-mingw32/include
+    - -D_WIN32_WINNT=0x0500
+    # InterlockedExchange((LONG *)&s->done, ...): Watcom's prototype takes a
+    # plain LONG *, so the cast off the volatile field is required to compile
+    # the agent at all, while mingw declares the parameter volatile and so
+    # sees the cast as dropping the qualifier. The cast is correct where it is
+    # compiled; silencing it here keeps four warnings out of a file that is
+    # otherwise clean, rather than teaching the reader to ignore warnings.
+    - -Wno-cast-qual
+  Remove:
+    - -D_GNU_SOURCE
+
+---
+# Test code is allowed two things the library is not, and an editor should not
+# nag about either. system() is how a fixture builds a tree of files on disk,
+# and an unsigned multiplication widened to size_t is ordinary when the
+# operands are literal test sizes.
+If:
+  PathMatch: tests/.*
+Diagnostics:
+  ClangTidy:
+    Remove:
+      - cert-env33-c
+      - bugprone-implicit-widening-of-multiplication-result

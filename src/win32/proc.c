@@ -209,8 +209,15 @@ wl_status wl_proc_start(const char *cmd, const char *cwd, int merge_stderr,
 
     vi.dwOSVersionInfoSize = sizeof(vi);
     (void)GetVersionExA(&vi);
-    if (GetEnvironmentVariableA("COMSPEC", shell, sizeof(shell)) == 0)
-        strcpy(shell, vi.dwPlatformId == VER_PLATFORM_WIN32_NT ? "cmd.exe" : "command.com");
+    if (GetEnvironmentVariableA("COMSPEC", shell, sizeof(shell)) == 0) {
+        /* No COMSPEC: name the shell the platform ships. Copied by length
+         * because the source is a literal and the destination is MAX_PATH;
+         * strcpy here is safe but says so to no reader and no analyser. */
+        const char *fallback =
+            vi.dwPlatformId == VER_PLATFORM_WIN32_NT ? "cmd.exe" : "command.com";
+
+        memcpy(shell, fallback, strlen(fallback) + 1);
+    }
     len = strlen(shell) + strlen(cmd) + 8;
     line = malloc(len);
     p = calloc(1, sizeof(*p));
@@ -261,11 +268,14 @@ wl_status wl_proc_start(const char *cmd, const char *cwd, int merge_stderr,
             tries[n_tries++] = direct;
         tries[n_tries++] = line;
         for (unsigned i = 0; i < n_tries && !started; i++) {
-            char *copy = malloc(strlen(tries[i]) + 1);
+            /* CreateProcessA may write to the command line it is given, so
+             * each attempt gets its own copy. */
+            size_t try_len = strlen(tries[i]) + 1;
+            char *copy = malloc(try_len);
 
             if (copy == NULL)
                 continue;
-            strcpy(copy, tries[i]);
+            memcpy(copy, tries[i], try_len);
             started = CreateProcessA(NULL, copy, NULL, NULL, TRUE, 0, NULL,
                                      cwd != NULL && cwd[0] != '\0' ? cwd : NULL, &si,
                                      &pi) != 0;

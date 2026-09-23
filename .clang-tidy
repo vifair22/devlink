@@ -1,9 +1,13 @@
-# clang-tidy configuration for ascii-check.
+# clang-tidy configuration for w98link.
 #
 # The enabled set is the checks that find real defects in C: the static
 # analyser, the bugprone family, CERT's security rules, and the performance
 # and portability groups. Everything switched off below is off for a stated
 # reason rather than because it was noisy once.
+#
+# `make tidy` runs this over the native sources and, separately, over the
+# Win32 agent sources against mingw-w64's headers; see the Makefile and
+# .clangd, which give an editor the same view.
 
 Checks: >
   bugprone-*,
@@ -49,17 +53,19 @@ CheckOptions:
 # Why each exclusion:
 #
 # readability-magic-numbers
-#   UTF-8 is defined in terms of specific byte patterns (0xC0, 0x80, 0x1F).
-#   Naming each one would obscure the encoding rather than explain it.
+#   The protocol is defined in terms of specific numbers: a 5-byte record
+#   header, a 32-frame window, 4 KiB chunks. The named constants live in
+#   proto.h and link.h; naming every arithmetic occurrence as well would
+#   obscure the format rather than explain it.
 #
 # readability-identifier-length
 #   Short names are idiomatic in C for tight scopes: `p` and `n` in a scan
 #   loop read better than `current_pointer` and `sequence_length`.
 #
 # readability-function-cognitive-complexity
-#   The argument parser and the scan loop are branchy by nature. Splitting
-#   them to satisfy a metric would spread one coherent decision across
-#   several functions.
+#   The link state machine, the agent's record handlers and the CLI's option
+#   parser are branchy by nature. Splitting them to satisfy a metric would
+#   spread one coherent decision across several functions.
 #
 # readability-braces-around-statements, readability-isolate-declaration
 #   Style, not correctness, and the codebase is already consistent.
@@ -68,29 +74,30 @@ CheckOptions:
 #   Fires on every (buffer, length) pair, which is most of this API.
 #
 # misc-no-recursion
-#   walk_plain is recursive by design; its depth is bounded explicitly and
-#   its stack cost is checked by `make analyze`.
+#   walk_dir in the fs backends recurses by design; its depth is bounded by
+#   WL_PATH_MAX and its stack cost is checked by `make analyze`.
 #
 # cert-err33-c
-#   Demands checking the return of every printf. Output to a report stream
-#   that has already failed has nothing useful to do about it.
+#   Demands checking the return of every printf. The agent's log lines and the
+#   client's output have nothing useful to do about a failed write to a stream
+#   that has already failed.
 #
 # bugprone-suspicious-realloc-usage
-#   Fires on the grow-by-doubling idiom used by every dynamic array here.
-#   Each one assigns through a temporary and frees on failure, which is the
-#   pattern the check exists to encourage.
+#   Fires on the grow-by-doubling idiom, used by the @dir listing buffer.
+#   It assigns through a temporary and frees on failure, which is the pattern
+#   the check exists to encourage.
 #
 # misc-include-cleaner
 #   Wants every symbol's defining header included directly, even when a
-#   project header already provides it by design. error.h exists precisely so
-#   a caller gets ac_status and the setters together; satisfying the check
-#   would mean pasting ascii_check.h into every file and defeating the
+#   project header already provides it by design. link.h exists precisely so a
+#   caller gets the frame and status types with it; satisfying the check would
+#   mean pasting the dependency graph into every file and defeating the
 #   layering.
 #
 # clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
 #   Demands the C11 Annex K functions (snprintf_s, memset_s). Annex K is
-#   optional, glibc does not implement it, and every bounded call here
-#   already passes an explicit size and checks the result.
+#   optional, neither glibc nor Open Watcom implements it, and every bounded
+#   call here already passes an explicit size and checks the result.
 #
 # bugprone-multi-level-implicit-pointer-conversion
 #   Fires on passing a char ** to free() and on assigning realloc's void *
@@ -98,22 +105,20 @@ CheckOptions:
 #   check is aimed at C++.
 #
 # readability-implicit-bool-conversion
-#   C has no native bool, and testing an int for truth or returning a bool
-#   where a status is expected is ordinary C. Satisfying the check would mean
-#   sprinkling "!= 0" and "? 1 : 0" through code that is already clear.
+#   C has no native bool, and testing an int for truth or returning a status
+#   as an int is ordinary C. Satisfying the check would mean sprinkling
+#   "!= 0" and "? 1 : 0" through code that is already clear.
 #
 # readability-trailing-comma
-#   Added to clang-tidy after this config was written and swept in by the
-#   readability-* glob, so it appeared as 174 new errors on the first machine
-#   with a newer LLVM (23.1.1 via Homebrew) rather than through any change to
-#   the code. It demands a trailing comma on the last enumerator and the last
-#   initializer. Pure layout, and the codebase is already consistent without
-#   it.
+#   Layout only: it demands a trailing comma on the last enumerator and the
+#   last initializer. It arrived in a later clang-tidy and was swept in by the
+#   readability-* glob, so it can appear as a pile of new errors on a machine
+#   with a newer LLVM without anything in the code having changed.
 #
 # bugprone-signed-bitwise.IgnorePositiveIntegerLiterals
-#   Not an exclusion: the check stays on. Every instance it flagged here is an
-#   unsigned value against a positive literal -- `b0 & 0xE0` in the UTF-8
-#   decoder, `1 << 16` as a capacity, `key >> 32` in the report hash. The
-#   literal is an int because that is what C makes an unquoted constant; none
-#   of them can be negative. The option narrows the check to operands that
-#   really are signed, which is the case worth failing a build over.
+#   Not an exclusion: the check stays on. The bit work here is on protocol
+#   fields (the 32-bit selective-ack bitmap, the channel flags, the drive
+#   letters seen as a bitmask) against positive literals. The literal is an
+#   int because that is what C makes an unquoted constant; none of them can be
+#   negative. The option narrows the check to operands that really are signed,
+#   which is the case worth failing a build over.
