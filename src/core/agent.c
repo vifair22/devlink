@@ -62,6 +62,12 @@ struct xfer {
     int at_eof;
 };
 
+/* A process being released, one node per abandoned command. */
+struct reaping {
+    struct wl_proc *proc;
+    struct reaping *next;
+};
+
 struct pending_hash {
     char rel[WL_PATH_MAX];
     uint8_t want[WL_HASH_BYTES];
@@ -121,8 +127,11 @@ struct agent {
     struct sync sync;
     /* Processes being torn down. Abandoning a command must never hold up
      * the link (docs/bug-critical-error-hang.md, defect 2), so they are
-     * killed here and collected a little at a time by the serving loop. */
-    struct wl_proc *reaping[WL_AGENT_MAX_EXEC];
+     * killed here and collected a little at a time by the serving loop. A
+     * list rather than an array because a wedged child can outlive many
+     * commands, and running out of slots used to mean falling back to the
+     * blocking teardown, which is the thing being avoided. */
+    struct reaping *reaping;
     int stopping; /* @stop received: finish the exchange, then return */
 };
 
@@ -171,29 +180,37 @@ static struct exec *find_exec(struct agent *a, uint16_t ch)
 static void end_exec(struct agent *a, struct exec *e)
 {
     if (e->proc != NULL) {
-        unsigned i;
+        struct reaping *r = malloc(sizeof(*r));
 
-        for (i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-            if (a->reaping[i] == NULL) {
-                a->reaping[i] = e->proc;
-                break;
-            }
-        }
-        /* Only if every slot is taken, which needs several wedged children
-         * at once, does this fall back to waiting. */
-        if (i == WL_AGENT_MAX_EXEC)
+        if (r != NULL) {
+            r->proc = e->proc;
+            r->next = a->reaping;
+            a->reaping = r;
+        } else {
+            /* Out of memory for one pointer, so the bounded teardown it is;
+             * it no longer forces anything down, it only takes a moment. */
             wl_proc_free(e->proc);
+        }
     }
     free(e->stdin_q);
     free(e->out_buf);
     memset(e, 0, sizeof(*e));
 }
 
+/* One pass over the list, releasing whatever has finally let go. */
 static void reap(struct agent *a)
 {
-    for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-        if (a->reaping[i] != NULL && wl_proc_reap(a->reaping[i]))
-            a->reaping[i] = NULL;
+    struct reaping **link = &a->reaping;
+
+    while (*link != NULL) {
+        struct reaping *r = *link;
+
+        if (wl_proc_reap(r->proc)) {
+            *link = r->next;
+            free(r);
+        } else {
+            link = &r->next;
+        }
     }
 }
 
@@ -293,6 +310,17 @@ static size_t u64_dec(uint64_t v, char *out)
     for (i = 0; i < n; i++)
         out[i] = tmp[n - 1 - i];
     return n;
+}
+
+/* Appends a literal to a buffer kept by length rather than by a terminator,
+ * the same convention as u64_dec above. */
+static size_t put_lit(char *out, const char *lit)
+{
+    size_t i;
+
+    for (i = 0; lit[i] != '\0'; i++)
+        out[i] = lit[i];
+    return i;
 }
 
 /* One @dir listing, grown a line at a time. */
@@ -428,12 +456,83 @@ static int agent_caps(struct agent *a, uint16_t ch, struct exec *e)
 }
 
 /*
+ * @time reports the agent's wall clock, and with "set <seconds>" adopts the
+ * client's. The target keeps time badly (an A21m's RTC drifts minutes a day,
+ * and a dead CMOS battery loses it altogether), and everything the protocol
+ * decides about files rests on it: sync compares modification times, so a
+ * clock that is wrong makes it either resend a whole tree or miss changes.
+ *
+ * Setting the clock under a running session is safe because the link's timers
+ * are monotonic (wl_clock_ms, GetTickCount on the target), not wall clock.
+ * This is exactly what could not be done over Kermit, whose timers moved with
+ * the clock and whose session died when it changed.
+ *
+ * Returns nonzero if the slot is now serving the answer.
+ */
+static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec *e)
+{
+    char buf[128];
+    uint64_t now = 0;
+    size_t n = 0;
+    int off;
+
+    if (strncmp(arg, "set ", 4) == 0) {
+        uint64_t want = 0;
+        const char *p = arg + 4;
+
+        while (*p == ' ')
+            p++;
+        if (*p < '0' || *p > '9') {
+            (void)wl_peer_reject(a->peer, ch, WL_E_MALFORMED, "@time set needs a number");
+            return 0;
+        }
+        for (; *p >= '0' && *p <= '9'; p++)
+            want = (want * 10U) + (uint64_t)(*p - '0');
+        if (wl_clock_set_utc(want) != WL_OK) {
+            (void)wl_peer_reject(a->peer, ch, WL_E_ACCESS, wl_error());
+            return 0;
+        }
+        log_line(a, "clock: set from the client", "");
+    } else if (arg[0] != '\0') {
+        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "usage: @time [set SECONDS]");
+        return 0;
+    }
+    if (wl_clock_utc(&now) != WL_OK) {
+        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, wl_error());
+        return 0;
+    }
+    off = wl_clock_local_offset_minutes();
+    n += put_lit(buf + n, "utc ");
+    n += u64_dec(now, buf + n);
+    n += put_lit(buf + n, "\nlocaloffset ");
+    if (off < 0) {
+        buf[n++] = '-';
+        off = -off;
+    }
+    n += u64_dec((uint64_t)off, buf + n);
+    buf[n++] = '\n';
+
+    if (wl_peer_accept(a->peer, ch) != WL_OK)
+        return 0;
+    e->out_buf = malloc(n);
+    if (e->out_buf == NULL) {
+        (void)wl_peer_close(a->peer, ch);
+        return 0;
+    }
+    memcpy(e->out_buf, buf, n);
+    e->out_len = n;
+    e->active = 1;
+    e->ch = ch;
+    return 1;
+}
+
+/*
  * Commands beginning with '@' address the agent itself rather than the shell
  * (docs/protocol.md, "EXEC"). @stop exists so the agent can be replaced: the
  * launcher copies a new binary in and starts it again. @dir lists a directory
  * without going near command.com, which is what makes it report long names,
  * exact sizes and a real exit status. @caps reports what the port it is
- * serving on can be set to.
+ * serving on can be set to, and @time reads or sets the clock.
  *
  * Returns nonzero if the exec slot is now in use.
  */
@@ -450,6 +549,13 @@ static int agent_command(struct agent *a, uint16_t ch, const char *cmd, struct e
     }
     if (strcmp(cmd, "@caps") == 0)
         return agent_caps(a, ch, e);
+    if (strncmp(cmd, "@time", 5) == 0 && (cmd[5] == ' ' || cmd[5] == '\0')) {
+        const char *arg = cmd + 5;
+
+        while (*arg == ' ')
+            arg++;
+        return agent_time(a, ch, arg, e);
+    }
     if (strcmp(cmd, "@stop") != 0) {
         (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "unknown agent command");
         return 0;
@@ -1517,10 +1623,16 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
     }
     if (a->sync.active)
         sync_end(&a->sync);
-    /* Shutting down is the one place that may wait for a child. */
-    for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-        if (a->reaping[i] != NULL)
-            wl_proc_free(a->reaping[i]);
+    /* Shutting down is the one place that waits for a child at all, and even
+     * there the wait is bounded: a child that will not go is abandoned rather
+     * than forced, so the agent always reaches its exit and its launcher can
+     * start the replacement. */
+    while (a->reaping != NULL) {
+        struct reaping *r = a->reaping;
+
+        a->reaping = r->next;
+        wl_proc_free(r->proc);
+        free(r);
     }
     wl_peer_free(a->peer);
     free(a);

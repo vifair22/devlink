@@ -3,6 +3,7 @@
 #include <string.h>
 #include <windows.h>
 
+#include "w98link/clock.h"
 #include "w98link/proc.h"
 
 /*
@@ -18,6 +19,8 @@
  */
 
 #define RING 65536U
+/* How long shutdown waits for a wedged reader before abandoning it. */
+#define FREE_WAIT_MS 2000U
 
 struct ring {
     uint8_t buf[RING];
@@ -389,20 +392,6 @@ void wl_proc_kill(struct wl_proc *p)
         (void)TerminateProcess(p->process, 1);
 }
 
-static void join(HANDLE *thread)
-{
-    if (*thread == NULL)
-        return;
-    /* A reader can stay blocked if a grandchild still holds the pipe open.
-     * Waiting forever would hang the agent, so give up after a while; the
-     * thread only touches memory freed below if it wakes, and by then the
-     * process state it reads is gone, so terminate it instead. */
-    if (WaitForSingleObject(*thread, 2000) != WAIT_OBJECT_0)
-        (void)TerminateThread(*thread, 1);
-    CloseHandle(*thread);
-    *thread = NULL;
-}
-
 int wl_proc_reap(struct wl_proc *p)
 {
     uint32_t code;
@@ -445,25 +434,25 @@ int wl_proc_reap(struct wl_proc *p)
 
 void wl_proc_free(struct wl_proc *p)
 {
-    uint32_t code;
+    uint32_t start = wl_clock_ms();
 
     if (p == NULL)
         return;
-    if (!wl_proc_exited(p, &code)) {
-        wl_proc_kill(p);
-        (void)WaitForSingleObject(p->process, 2000);
+    /*
+     * Shutdown goes through the same reaper the serving loop uses, for a
+     * bounded time, and gives up rather than forcing anything: a reader
+     * thread blocked in ReadFile holds a pointer to p and may hold the C
+     * runtime's lock, so TerminateThread on it risks a broken heap in the
+     * rest of the process, and freeing p under it is a use-after-free. This
+     * used to terminate the thread after two seconds and free p anyway.
+     *
+     * The cost of giving up is one abandoned struct, about 200 KB of rings
+     * and handles, which is paid at most once per wedged child; the thread
+     * exits on its own whenever the grandchild holding the pipe finally goes.
+     */
+    while (!wl_proc_reap(p)) {
+        if (wl_clock_since(start) >= FREE_WAIT_MS)
+            return;
+        Sleep(10);
     }
-    InterlockedExchange((LONG *)&p->stopping, 1);
-    if (p->in_wake != NULL)
-        SetEvent(p->in_wake);
-    join(&p->in.thread);
-    close_handle(&p->out.pipe);
-    close_handle(&p->err.pipe);
-    join(&p->out.thread);
-    join(&p->err.thread);
-    close_handle(&p->in.pipe);
-    close_handle(&p->in_wake);
-    CloseHandle(p->process);
-    DeleteCriticalSection(&p->lock);
-    free(p);
 }

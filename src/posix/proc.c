@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +9,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "w98link/clock.h"
 #include "w98link/proc.h"
+
+/* How long shutdown waits for the child to go before giving up on it. */
+#define FREE_WAIT_MS 2000U
 
 /* POSIX implementation: non-blocking pipe ends polled from the caller's
  * loop. The kernel's pipe buffer is the only queue on each stream, which is
@@ -217,16 +222,17 @@ int wl_proc_reap(struct wl_proc *p)
 
 void wl_proc_free(struct wl_proc *p)
 {
-    uint32_t code;
+    uint32_t start = wl_clock_ms();
 
     if (p == NULL)
         return;
-    if (!wl_proc_exited(p, &code)) {
-        wl_proc_kill(p);
-        (void)waitpid(p->pid, NULL, 0);
+    /* The same shape as the Win32 side: the reaper, bounded, rather than a
+     * blocking wait. Nothing here can wedge the way a Win32 reader thread
+     * can, since there are no threads, but one shutdown path in two shapes
+     * is one shape too many. */
+    while (!wl_proc_reap(p)) {
+        if (wl_clock_since(start) >= FREE_WAIT_MS)
+            return;
+        (void)poll(NULL, 0, 10);
     }
-    close_fd(&p->in_fd);
-    close_fd(&p->out_fd);
-    close_fd(&p->err_fd);
-    free(p);
 }

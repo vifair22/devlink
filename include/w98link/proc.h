@@ -41,8 +41,14 @@ int wl_proc_exited(struct wl_proc *p, uint32_t *code);
 
 void wl_proc_kill(struct wl_proc *p);
 
-/* Kills the process if it is still running, then releases everything. May
- * block for a few seconds, so it is for shutdown, not for the serving loop. */
+/*
+ * For shutdown: runs wl_proc_reap until it lets go, for at most a couple of
+ * seconds, then abandons the handle. It never forces a thread down, because a
+ * reader blocked on a pipe holds a pointer into this structure and may hold
+ * the C runtime's lock; killing it would risk the rest of the process, and
+ * freeing underneath it would be worse. Abandoning costs one struct, and the
+ * thread exits by itself when whatever holds the pipe open goes.
+ */
 void wl_proc_free(struct wl_proc *p);
 
 /*

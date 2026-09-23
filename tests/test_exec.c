@@ -506,6 +506,104 @@ static void test_agent_caps_reports_the_port(void **state)
     assert_non_null(strstr(cap.out, "current 115200\n"));
 }
 
+/*
+ * Many commands abandoned one after another, more than the eight exec slots
+ * the agent has: the reaper used to be a fixed array of that size, and once
+ * full it fell back to the blocking teardown in the middle of serving. The
+ * agent must stay responsive throughout and shut down cleanly after.
+ */
+static void test_many_abandoned_commands_keep_the_agent_responsive(void **state)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_hello hello;
+
+    (void)state;
+    for (int i = 0; i < 12; i++) {
+        struct wl_peer_handlers h;
+        struct wl_peer *p;
+        uint8_t args[64];
+        struct wl_wbuf w;
+        uint16_t ch;
+        uint32_t start = wl_clock_ms();
+
+        memset(&h, 0, sizeof(h));
+        p = wl_peer_new(&cfg, (uint32_t)(50000 + i), wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
+        assert_non_null(p);
+        while (!wl_peer_ready(p) && wl_clock_since(start) < 3000U)
+            assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_true(wl_peer_ready(p));
+
+        wl_wbuf_init(&w, args, sizeof(args));
+        wl_w_str(&w, "sleep 30", 8);
+        wl_w_str(&w, "", 0);
+        wl_w_u8(&w, 0);
+        assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &ch), WL_OK);
+        start = wl_clock_ms();
+        while (wl_clock_since(start) < 100U)
+            assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        wl_peer_free(p); /* abandoned with the command still running */
+    }
+
+    /* Still answering, promptly, after twelve of them. */
+    {
+        uint32_t start = wl_clock_ms();
+
+        assert_int_equal(wl_client_info(&client_t, &cfg, 4243, 3000, &hello), WL_OK);
+        assert_true(wl_clock_since(start) < 2500U);
+    }
+}
+
+static void test_agent_time_reports_the_clock(void **state)
+{
+    struct wl_exec_result r;
+    const char *at;
+    long long secs;
+    uint64_t here = 0;
+
+    (void)state;
+    assert_int_equal(run("@time", NULL, 0, &r), WL_OK);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+    cap.out[cap.out_len] = '\0';
+    at = strstr(cap.out, "utc ");
+    assert_non_null(at);
+    assert_non_null(strstr(cap.out, "localoffset "));
+    secs = strtoll(at + 4, NULL, 10);
+    assert_int_equal(wl_clock_utc(&here), WL_OK);
+    /* The agent is this process, so the two clocks are the same one. */
+    assert_true(secs >= (long long)here - 5 && secs <= (long long)here + 5);
+}
+
+/*
+ * The POSIX backend refuses to set the clock, by design rather than for want
+ * of an implementation: this test suite must never be able to move the clock
+ * of the machine it runs on, and this is where that is nailed down.
+ */
+static void test_agent_time_will_not_set_the_clock_here(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("@time set 1000000000", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_ACCESS);
+    assert_non_null(strstr(r.message, "not supported"));
+}
+
+static void test_agent_time_rejects_nonsense(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("@time set soon", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_MALFORMED);
+
+    assert_int_equal(run("@time forward", NULL, 0, &r), WL_OK);
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, WL_E_UNKNOWN);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -532,6 +630,12 @@ int main(void)
                                         teardown),
         cmocka_unit_test_setup_teardown(test_agent_dir_failures, setup, teardown),
         cmocka_unit_test_setup_teardown(test_agent_caps_reports_the_port, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_many_abandoned_commands_keep_the_agent_responsive,
+                                        setup, teardown),
+        cmocka_unit_test_setup_teardown(test_agent_time_reports_the_clock, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_agent_time_will_not_set_the_clock_here, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_agent_time_rejects_nonsense, setup, teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
