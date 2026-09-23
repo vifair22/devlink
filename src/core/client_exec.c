@@ -238,7 +238,14 @@ wl_status wl_client_exec(struct wl_transport *t, const struct wl_session_cfg *cf
             }
         }
     }
-    if (st == WL_OK && c.phase == PH_DONE) {
+    /*
+     * The channel is closed on the way out whatever happened, not only when
+     * the command succeeded. While each command owned its own session this
+     * made no difference, since the session died with the process and took
+     * everything with it; with a multiplexer the session outlives the command
+     * and an unclosed channel is a channel number held for ever.
+     */
+    if (st == WL_OK && c.phase != PH_CONNECT) {
         uint32_t linger = wl_clock_ms();
 
         while (wl_peer_close(c.peer, c.ch) == WL_ERR_NOSPACE &&

@@ -30,6 +30,7 @@ struct xfer {
     uint32_t crc;
     int sent_end;
     int sessions;
+    int opened; /* the channel exists and has to be closed on the way out */
 };
 
 static void fail_msg(struct xfer *x, uint16_t code, const char *msg, size_t n)
@@ -60,6 +61,7 @@ static void on_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char 
         fail_msg(x, code, msg, n);
         return;
     }
+    x->opened = 1;
     x->phase = PH_RUNNING;
 }
 
@@ -229,7 +231,10 @@ static wl_status run(struct wl_transport *t, const struct wl_session_cfg *cfg, u
             push_file(x);
         }
     }
-    if (st == WL_OK) {
+    /* Closed whether or not the transfer worked: see the note in
+     * client_exec.c. A refused or failed transfer holds a channel just as
+     * firmly as a successful one. */
+    if (st == WL_OK && x->opened) {
         uint32_t linger = wl_clock_ms();
 
         while (wl_peer_close(x->peer, x->ch) == WL_ERR_NOSPACE &&

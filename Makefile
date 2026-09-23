@@ -225,6 +225,10 @@ $(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(COV_LIB_OBJS) $(TEST_DEPS) 
 	    -pthread -o $@ $< $(COV_LIB_OBJS) $(ZLIB_LIB) -lcmocka
 
 coverage-run: $(COV_BINS)
+	@# Counters from an earlier run, or from an earlier layout of these
+	@# objects, make gcov report a stamp mismatch and gcovr fail with an
+	@# error that names neither. Each run starts from nothing.
+	@find $(COV_OBJ_DIR) $(BUILD_DIR)/coverage -name '*.gcda' -delete 2>/dev/null || true
 	@for t in $(COV_BINS); do $$t >/dev/null || true; done
 # gcov's counters wrap on the hottest inlined functions (sha256's rotations,
 # once a test hashes 100 MB), and gcovr treats the wrapped value as a parse

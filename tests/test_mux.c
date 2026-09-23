@@ -348,6 +348,41 @@ static void test_a_connection_that_closes_at_once_does_not_kill_the_multiplexer(
     assert_int_equal(hello.proto, WL_PROTO_VERSION);
 }
 
+/*
+ * Channel numbers are finite (WL_PEER_MAX_CHANNELS) and a channel is released
+ * only when both ends have closed it. A multiplexer keeps one session for as
+ * long as it runs, so anything it fails to close is gone for good, and after
+ * sixteen commands it can open nothing at all.
+ *
+ * Twenty commands through one multiplexer is therefore the whole test: with
+ * the leak it dies around the sixteenth, and no introspection is needed to
+ * see it. Failures are included because the client used to close its channel
+ * only when the command had succeeded.
+ */
+static void test_channels_are_released_so_a_long_session_does_not_run_out(void **state)
+{
+    struct wl_session_cfg cfg = local_session();
+
+    (void)state;
+    wait_for_the_line();
+    for (int i = 0; i < 20; i++) {
+        struct wl_exec_result r;
+        struct capture cap;
+        struct wl_exec_io io = {&cap, on_output, NULL};
+        struct wl_transport t;
+
+        memset(&cap, 0, sizeof(cap));
+        assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+        assert_int_equal(wl_client_exec(&t, &cfg, (uint32_t)(1000 + i),
+                                        i % 3 == 0 ? "exit 3" : "echo ok", NULL, 0, &io,
+                                        5000, &r),
+                         WL_OK);
+        wl_transport_close(&t);
+        assert_true(r.ran);
+        assert_int_equal(r.exit_code, i % 3 == 0 ? 3U : 0U);
+    }
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -362,6 +397,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(
             test_a_connection_that_closes_at_once_does_not_kill_the_multiplexer, setup,
             teardown),
+        cmocka_unit_test_setup_teardown(
+            test_channels_are_released_so_a_long_session_does_not_run_out, setup, teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

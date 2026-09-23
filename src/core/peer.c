@@ -721,6 +721,17 @@ wl_status wl_peer_close(struct wl_peer *p, uint16_t ch)
     return WL_OK;
 }
 
+unsigned wl_peer_channels_open(const struct wl_peer *p)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < WL_PEER_MAX_CHANNELS; i++) {
+        if (p->chans[i].state != CH_FREE)
+            n++;
+    }
+    return n;
+}
+
 int wl_peer_idle(const struct wl_peer *p)
 {
     if (p->ctl.len > 0 || p->cur != NO_SOURCE)

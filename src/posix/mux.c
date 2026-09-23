@@ -29,6 +29,7 @@ struct stash {
 struct pair {
     int used;
     unsigned client;
+    unsigned client_serial;
     uint16_t local;
     uint16_t up;
     int up_open;  /* the agent accepted it */
@@ -41,6 +42,17 @@ struct pair {
      * resynchronising at that moment.
      */
     int waiting;
+    int up_closed;   /* the agent closed its end */
+    int down_closed; /* the client closed its end */
+    /*
+     * A close can be refused (WL_ERR_NOSPACE) while the channel still has
+     * records queued, so what matters is not that it was attempted but that it
+     * was sent. Freeing a pair whose close never went out holds the channel
+     * number for the life of the multiplexer, which is exactly the leak this
+     * file had.
+     */
+    int up_close_sent;
+    int down_close_sent;
     uint8_t kind;
     uint8_t *args;
     size_t args_len;
@@ -60,6 +72,9 @@ struct client {
     struct wl_peer *peer;
     struct mux *m;
     unsigned index;
+    /* Slots are reused, so a pair that outlives its client would otherwise
+     * find a stranger in the same slot and close one of its channels. */
+    unsigned serial;
 };
 
 struct mux {
@@ -71,6 +86,7 @@ struct mux {
     struct client clients[MUX_CLIENTS];
     struct pair pairs[MUX_PAIRS];
     uint32_t seed;
+    unsigned next_serial;
     uint32_t alone_since; /* when the last client left, for the idle timer */
 };
 
@@ -105,6 +121,18 @@ static struct pair *pair_by_up(struct mux *m, uint16_t ch)
             return &m->pairs[i];
     }
     return NULL;
+}
+
+/* Defined below: the teardown is used by the handlers above it. */
+static void try_finish(struct mux *m, struct pair *p);
+
+static struct client *pair_client(struct mux *m, const struct pair *p)
+{
+    struct client *c = &m->clients[p->client];
+
+    if (!c->used || c->serial != p->client_serial)
+        return NULL;
+    return c;
 }
 
 static void pair_free(struct pair *p)
@@ -142,9 +170,14 @@ static void up_session(void *ctx)
 
         if (!p->used)
             continue;
-        if (m->clients[p->client].used)
-            (void)wl_peer_close(m->clients[p->client].peer, p->local);
-        pair_free(p);
+        /* The upstream channels went with the session, so there is nothing
+         * left to close over there and no number to hold. The client's side
+         * still has to be closed, and try_finish will keep trying. */
+        p->up_open = 0;
+        p->pending = 0;
+        p->up_closed = 1;
+        p->up_close_sent = 1;
+        try_finish(m, p);
     }
     log_line(m, "line: session restarted", "");
 }
@@ -167,16 +200,20 @@ static void up_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char 
     if (p == NULL || !p->pending)
         return;
     p->pending = 0;
-    if (!m->clients[p->client].used) {
-        if (ok)
-            (void)wl_peer_close(m->up, ch);
-        pair_free(p);
+    p->up_open = ok ? 1 : 0;
+    if (pair_client(m, p) == NULL) {
+        /* Its client left while the agent was deciding; the channel it just
+         * granted has to be handed back. */
+        p->down_closed = 1;
+        p->up_closed = !ok;
+        try_finish(m, p);
         return;
     }
     if (ok) {
-        p->up_open = 1;
-        if (wl_peer_accept(m->clients[p->client].peer, p->local) != WL_OK)
-            pair_free(p);
+        if (wl_peer_accept(m->clients[p->client].peer, p->local) != WL_OK) {
+            p->down_closed = 1;
+            try_finish(m, p);
+        }
         return;
     }
     if (n >= sizeof(text))
@@ -198,6 +235,48 @@ static void up_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *data,
         stash_put(&p->to_down, type, data, n);
 }
 
+/*
+ * Finishes a channel in both directions, and is safe to call again until it
+ * succeeds. Three things had to be true and were not:
+ *
+ * - Our own end of the upstream channel has to be closed as well as the
+ *   client's. A channel number is released only once both sides have closed
+ *   it, so answering the agent's CLOSE without sending ours held the number
+ *   for the life of the multiplexer. It leaked only when the agent's CLOSE won
+ *   the race against the client's, which is why it appeared as one stuck
+ *   channel rather than one per command.
+ * - A close can be refused while the channel still has records queued, so the
+ *   pair may not be freed until the close has actually gone out. Attempting it
+ *   once and freeing regardless is the same leak with extra steps.
+ * - A channel awaiting its OPEN_OK cannot be closed at all, so that case waits
+ *   for the answer rather than being dropped.
+ */
+static void try_finish(struct mux *m, struct pair *p)
+{
+    struct client *c = pair_client(m, p);
+
+    if (c == NULL) {
+        /* Nobody is waiting for what was held for the client. */
+        p->to_down.full = 0;
+        p->to_up.full = 0;
+    }
+    if (p->to_up.full || p->to_down.full)
+        return; /* flushed first, so nothing in flight is lost */
+    if (p->pending)
+        return; /* cannot close a channel that has no answer to its OPEN yet */
+    if (p->up_open && !p->up_close_sent) {
+        if (wl_peer_close(m->up, p->up) != WL_OK)
+            return;
+        p->up_close_sent = 1;
+    }
+    if (c != NULL && !p->down_closed && !p->down_close_sent) {
+        if (wl_peer_close(c->peer, p->local) != WL_OK)
+            return;
+        p->down_close_sent = 1;
+    }
+    pair_free(p);
+}
+
 static void up_closed(void *ctx, uint16_t ch)
 {
     struct mux *m = ctx;
@@ -205,15 +284,8 @@ static void up_closed(void *ctx, uint16_t ch)
 
     if (p == NULL)
         return;
-    /* Anything stashed for the client still has to reach it, so the pair is
-     * left until the stash drains; only then is the close passed on. */
-    if (p->to_down.full) {
-        p->up_open = 0;
-        return;
-    }
-    if (m->clients[p->client].used)
-        (void)wl_peer_close(m->clients[p->client].peer, p->local);
-    pair_free(p);
+    p->up_closed = 1;
+    try_finish(m, p);
 }
 
 static void up_error(void *ctx, uint16_t code, const char *msg, size_t n)
@@ -250,6 +322,7 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
     memset(p, 0, sizeof(*p));
     p->used = 1;
     p->client = c->index;
+    p->client_serial = c->serial;
     p->local = ch;
     if (!m->up_ready) {
         p->args = malloc(n > 0 ? n : 1);
@@ -282,7 +355,7 @@ static void open_the_waiting(struct mux *m)
 
         if (!p->used || !p->waiting)
             continue;
-        if (!m->clients[p->client].used) {
+        if (pair_client(m, p) == NULL) {
             pair_free(p);
             continue;
         }
@@ -320,13 +393,28 @@ static void down_closed(void *ctx, uint16_t ch)
 
     if (p == NULL)
         return;
-    if (p->to_up.full) {
-        /* Let what was already sent reach the agent before closing. */
-        return;
+    p->down_closed = 1;
+    try_finish(c->m, p);
+}
+
+/*
+ * Retries every teardown that could not complete: a stash that had not
+ * drained, a close the mux refused because records were still queued, a
+ * channel that had no answer to its OPEN yet. Without this pass the comment
+ * explaining why the close was deferred was the only thing that ever finished
+ * it.
+ */
+static void finish_closes(struct mux *m)
+{
+    for (unsigned i = 0; i < MUX_PAIRS; i++) {
+        struct pair *p = &m->pairs[i];
+
+        if (!p->used)
+            continue;
+        if (!p->up_closed && !p->down_closed && pair_client(m, p) != NULL)
+            continue;
+        try_finish(m, p);
     }
-    if (p->up_open || p->pending)
-        (void)wl_peer_close(c->m->up, p->up);
-    pair_free(p);
 }
 
 static void down_error(void *ctx, uint16_t code, const char *msg, size_t n)
@@ -343,27 +431,39 @@ static void down_error(void *ctx, uint16_t code, const char *msg, size_t n)
  * clients
  * ------------------------------------------------------------------------- */
 
+static unsigned count_pairs(const struct mux *m)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < MUX_PAIRS; i++) {
+        if (m->pairs[i].used)
+            n++;
+    }
+    return n;
+}
+
 static void drop_client(struct mux *m, unsigned index)
 {
     struct client *c = &m->clients[index];
 
-    for (unsigned i = 0; i < MUX_PAIRS; i++) {
-        struct pair *p = &m->pairs[i];
-
-        if (!p->used || p->client != index)
-            continue;
-        /*
-         * The client is gone, so its command is nobody's: closing the channel
-         * on the line is what makes the agent kill it. Concurrency without
-         * detach means exactly this.
-         */
-        if (p->up_open || p->pending)
-            (void)wl_peer_close(m->up, p->up);
-        pair_free(p);
-    }
+    /*
+     * The client is gone, so its commands are nobody's: closing their channels
+     * on the line is what makes the agent kill them. Concurrency without
+     * detach means exactly this.
+     *
+     * The client's slot is released first and the pairs are left for
+     * try_finish, because the close upstream may be refused this moment and
+     * has to be retried; freeing the pair here was how the number leaked.
+     */
     wl_peer_free(c->peer);
     wl_transport_close(&c->t);
     memset(c, 0, sizeof(*c));
+    for (unsigned i = 0; i < MUX_PAIRS; i++) {
+        struct pair *p = &m->pairs[i];
+
+        if (p->used && p->client == index)
+            try_finish(m, p);
+    }
     log_line(m, "client gone", "");
 }
 
@@ -389,6 +489,7 @@ static void accept_client(struct mux *m, int listen_fd)
     }
     memset(c, 0, sizeof(*c));
     c->index = (unsigned)(c - m->clients);
+    c->serial = ++m->next_serial;
     c->t = t;
     c->m = m;
     memset(&h, 0, sizeof(h));
@@ -411,7 +512,20 @@ static void accept_client(struct mux *m, int listen_fd)
     /* What the client asked about is the agent, not this relay. */
     wl_peer_set_identity(c->peer, m->agent.platform, m->agent.build);
     c->used = 1;
-    log_line(m, "client connected", "");
+    {
+        /*
+         * The leak detector, sampled here rather than as a client leaves: a
+         * channel is released only once both sides have closed it, so a count
+         * taken just after we close our own side always reads one and proves
+         * nothing. What matters is what the previous clients left behind,
+         * which is what is standing here before this one has done anything.
+         */
+        char note[80];
+
+        (void)snprintf(note, sizeof(note), "client connected (line channels held: %u, pairs: %u)",
+                       wl_peer_channels_open(m->up), count_pairs(m));
+        log_line(m, note, "");
+    }
 }
 
 /* Tries the stashed records again; returns nonzero if any is still waiting. */
@@ -541,6 +655,7 @@ wl_status wl_mux_serve(struct wl_transport *line, const struct wl_mux_cfg *cfg, 
         if (fds[0].revents != 0 && m->up_ready)
             accept_client(m, listen_fd);
         open_the_waiting(m);
+        finish_closes(m);
 
         /* Pumped with no wait: the poll above is the only place this sleeps. A
          * peer whose records cannot be handed on is left alone, which stops its

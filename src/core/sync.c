@@ -48,6 +48,7 @@ struct sync {
     uint64_t file_left;
     uint32_t file_crc;
     int need_end;
+    int opened; /* the channel exists and has to be closed on the way out */
 };
 
 /* Temporary tracing, enabled with DEVLINK_DEBUG=1. */
@@ -136,6 +137,7 @@ static void on_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char 
         fail_msg(s, code, msg, n);
         return;
     }
+    s->opened = 1;
     s->phase = PH_MANIFEST;
 }
 
@@ -427,7 +429,9 @@ wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cf
         }
     }
 out_done:
-    if (st == WL_OK) {
+    /* Closed whether or not the sync finished: see the note in
+     * client_exec.c. */
+    if (st == WL_OK && s.opened) {
         uint32_t linger = wl_clock_ms();
 
         while (wl_peer_close(s.peer, s.ch) == WL_ERR_NOSPACE &&

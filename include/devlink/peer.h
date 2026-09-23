@@ -100,4 +100,13 @@ wl_status wl_peer_close(struct wl_peer *p, uint16_t ch);
 /* Nothing queued in the mux and nothing unacknowledged below it. */
 int wl_peer_idle(const struct wl_peer *p);
 
+/*
+ * How many channel numbers are in use. A channel is released only once both
+ * sides have closed it, so this creeping upwards on a long-lived peer means
+ * somebody is not closing what they opened. That was invisible while every
+ * command owned its own session and the session's death cleaned up after it;
+ * the multiplexer keeps one session for days, so it needs the number.
+ */
+unsigned wl_peer_channels_open(const struct wl_peer *p);
+
 #endif
