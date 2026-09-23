@@ -67,7 +67,7 @@ DEBUG_FLAGS    := -Og -g3 -fno-omit-frame-pointer
 ASAN_FLAGS     := -Og -g3 -fsanitize=address,undefined -fno-omit-frame-pointer
 COVERAGE_FLAGS := -Og -g --coverage
 
-.PHONY: all release debug asan win98 test test-junit coverage coverage-run \
+.PHONY: all release debug asan win98 dist test test-junit coverage coverage-run \
         analyze tidy clean help variant
 
 all: release
@@ -181,6 +181,17 @@ test-junit: $(TEST_BINS)
 	    CMOCKA_MESSAGE_OUTPUT=xml \
 	    CMOCKA_XML_FILE=$(BUILD_DIR)/junit/$$name.junit.xml $$t || fail=1; \
 	done; exit $$fail
+
+# Everything the target needs, in the layout it is copied in: the agent, its
+# launcher and the instructions that go with it. DEST can point straight at a
+# flash drive (make dist DEST=/run/media/me/STICK).
+DEST ?= $(BUILD_DIR)/dist
+
+dist: $(AGENT)
+	@mkdir -p $(DEST)/W98AGENT
+	cp $(AGENT) $(DEST)/W98AGENT/
+	cp dist/AGENT.BAT dist/README.TXT $(DEST)/W98AGENT/
+	@echo "staged in $(DEST)/W98AGENT: copy that folder to C:\\ on the target"
 
 coverage:
 	@$(MAKE) --no-print-directory coverage-run VARIANT=coverage

@@ -1,0 +1,5 @@
+# The files under dist/ are copied to the target verbatim, so their CRLF line
+# endings must survive git: a batch file with bare LFs has doubled carriage
+# returns by the time it gets there and fails with "Bad command or file name".
+dist/*.BAT -text
+dist/*.TXT -text

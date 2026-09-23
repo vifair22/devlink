@@ -39,6 +39,8 @@ v2 for the agent (unpacked at `~/.local/opt/watcom`, or set `WATCOM=`).
 ```sh
 make            # Linux client -> build/bin/w98link
 make win98      # Win98 agent  -> build/bin/W98AGENT.EXE
+make dist       # agent + launcher + README, staged for the target
+                # (make dist DEST=/run/media/you/STICK writes it to a stick)
 make test       # cmocka suite
 make coverage   # line coverage, gated at 80%
 make analyze    # cppcheck, gcc -fanalyzer, stack usage
