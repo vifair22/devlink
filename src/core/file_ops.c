@@ -94,8 +94,30 @@ static void get_record(struct xfer *x, uint8_t type, const uint8_t *p, size_t n)
             return;
         }
         x->f = NULL;
-        if (x->done != x->size || x->crc != want) {
-            fail_msg(x, WL_E_CRC, "checksum mismatch", 17);
+        /*
+         * Told apart, because they mean different things and the two used to
+         * share one message. A short or long count is the transport losing or
+         * repeating something; a bad checksum over the right count is the
+         * bytes themselves arriving wrong. Which of the two it is decides
+         * where to look, so the message says, with the numbers.
+         */
+        if (x->done != x->size) {
+            char msg[96];
+            int k = snprintf(msg, sizeof(msg),
+                             "wrong number of bytes: expected %llu, received %llu",
+                             (unsigned long long)x->size, (unsigned long long)x->done);
+
+            fail_msg(x, WL_E_CRC, msg, k > 0 ? (size_t)k : 0);
+            return;
+        }
+        if (x->crc != want) {
+            char msg[96];
+            int k = snprintf(msg, sizeof(msg),
+                             "checksum mismatch over %llu bytes: sent %08lx, received %08lx",
+                             (unsigned long long)x->done, (unsigned long)want,
+                             (unsigned long)x->crc);
+
+            fail_msg(x, WL_E_CRC, msg, k > 0 ? (size_t)k : 0);
             return;
         }
         if (wl_fs_replace(x->tmp, x->local) != WL_OK) {

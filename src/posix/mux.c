@@ -8,21 +8,41 @@
 #include "devlink/mux.h"
 #include "devlink/proto.h"
 #include "devlink/usock.h"
+#include "devlink/wire.h"
 
 #define MUX_CLIENTS 8U
 #define MUX_PAIRS 12U
 #define LOOP_MS 20U
 
 /*
- * One record that could not be handed on because the other side's queue was
- * full. The source peer is not pumped again until it drains, so the sender's
- * credit window does the throttling and nothing is ever dropped.
+ * Records that could not be handed on because the other side's queue was full,
+ * kept in arrival order until it takes them.
+ *
+ * One would be enough if the source could be stopped the moment it refused,
+ * and the loop does stop pumping a peer whose records are not being taken. But
+ * records are dispatched from inside a pump, several per call, so by the time
+ * the first one is held here the rest of that pump's burst is already on its
+ * way. Keeping one and overwriting it lost a 4 KiB chunk out of the middle of
+ * a file, and said nothing: a large, highly compressible transfer failed its
+ * checksum because the line delivers such a file far faster than the far side
+ * drains it.
+ *
+ * What one pump can deliver is bounded. wl_peer_work drains the session's
+ * plaintext queue and never refills it part way through, so a single pump
+ * dispatches less than WL_SESSION_QUEUE, and no further pump happens while
+ * anything is held here. That bound is the cap below. Reaching it would mean
+ * the bound had stopped being true, which is a defect and not a busy line, so
+ * it ends the channel with a message rather than quietly losing a record.
  */
+#define STASH_CAP WL_SESSION_QUEUE
+#define STASH_FIRST 8192U
+#define STASH_HEADER 3U /* type, then the payload length */
+
 struct stash {
-    int full;
-    uint8_t type;
-    size_t len;
-    uint8_t buf[WL_REC_MAX_PAYLOAD];
+    uint8_t *buf;
+    size_t cap;
+    size_t head; /* first byte not yet handed on */
+    size_t len;  /* bytes held from head */
 };
 
 /* One channel of one client, and the channel it was relayed onto. */
@@ -135,20 +155,89 @@ static struct client *pair_client(struct mux *m, const struct pair *p)
     return c;
 }
 
+static int stash_waiting(const struct stash *s)
+{
+    return s->len > 0;
+}
+
+static void stash_clear(struct stash *s)
+{
+    s->head = 0;
+    s->len = 0;
+}
+
+static void stash_free(struct stash *s)
+{
+    free(s->buf);
+    s->buf = NULL;
+    s->cap = 0;
+    stash_clear(s);
+}
+
+/* Keeps a record for the direction that refused it. Zero means it would not
+ * fit, which the caller must treat as a failure and never as a discard. */
+static int stash_put(struct stash *s, uint8_t type, const uint8_t *data, size_t n)
+{
+    size_t need = STASH_HEADER + n;
+
+    if (need > STASH_CAP - s->len)
+        return 0;
+    if (s->cap - s->head - s->len < need) {
+        /* Reclaim what has been handed on before asking for more memory. */
+        if (s->head > 0) {
+            memmove(s->buf, s->buf + s->head, s->len);
+            s->head = 0;
+        }
+        while (s->cap - s->len < need) {
+            size_t want = s->cap == 0 ? STASH_FIRST : s->cap * 2U;
+            uint8_t *bigger;
+
+            if (want > STASH_CAP)
+                want = STASH_CAP;
+            bigger = realloc(s->buf, want);
+            if (bigger == NULL)
+                return 0;
+            s->buf = bigger;
+            s->cap = want;
+        }
+    }
+    s->buf[s->head + s->len] = type;
+    wl_put_u16le(s->buf + s->head + s->len + 1, (uint16_t)n);
+    if (n > 0)
+        memcpy(s->buf + s->head + s->len + STASH_HEADER, data, n);
+    s->len += need;
+    return 1;
+}
+
+/* The record at the front, which stays there until stash_drop takes it. */
+static int stash_front(const struct stash *s, uint8_t *type, const uint8_t **data, size_t *n)
+{
+    if (s->len == 0)
+        return 0;
+    *type = s->buf[s->head];
+    *n = wl_get_u16le(s->buf + s->head + 1);
+    *data = s->buf + s->head + STASH_HEADER;
+    return 1;
+}
+
+static void stash_drop(struct stash *s)
+{
+    size_t n = wl_get_u16le(s->buf + s->head + 1);
+
+    s->head += STASH_HEADER + n;
+    s->len -= STASH_HEADER + n;
+    if (s->len == 0)
+        s->head = 0;
+}
+
 static void pair_free(struct pair *p)
 {
     free(p->args);
+    stash_free(&p->to_up);
+    stash_free(&p->to_down);
     memset(p, 0, sizeof(*p));
 }
 
-/* Stashes a record for the direction that refused it. */
-static void stash_put(struct stash *s, uint8_t type, const uint8_t *data, size_t n)
-{
-    s->full = 1;
-    s->type = type;
-    s->len = n > sizeof(s->buf) ? sizeof(s->buf) : n;
-    memcpy(s->buf, data, s->len);
-}
 
 /* ---------------------------------------------------------------------------
  * handlers on the line
@@ -224,6 +313,27 @@ static void up_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char 
     pair_free(p);
 }
 
+/*
+ * The backlog would not take a record. That means more arrived in one pump
+ * than the bound above allows for, so the buffering that keeps this honest has
+ * stopped being enough. Truncating the transfer silently is the one thing that
+ * must not happen, so the channel ends here and says why; everything else on
+ * the line carries on.
+ */
+static void overflowed(struct mux *m, struct pair *p, const char *where)
+{
+    char note[96];
+
+    (void)snprintf(note, sizeof(note), "%s backlog full on channel %u; ending it", where,
+                   (unsigned)p->local);
+    log_line(m, "mux: ", note);
+    stash_clear(&p->to_up);
+    stash_clear(&p->to_down);
+    p->up_closed = 1;
+    p->down_closed = 1;
+    try_finish(m, p);
+}
+
 static void up_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *data, size_t n)
 {
     struct mux *m = ctx;
@@ -231,8 +341,12 @@ static void up_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *data,
 
     if (p == NULL || !m->clients[p->client].used)
         return;
-    if (wl_peer_send(m->clients[p->client].peer, p->local, type, data, n) != WL_OK)
-        stash_put(&p->to_down, type, data, n);
+    /* Anything already waiting goes first, or this record would overtake it. */
+    if (stash_waiting(&p->to_down)
+        || wl_peer_send(m->clients[p->client].peer, p->local, type, data, n) != WL_OK) {
+        if (!stash_put(&p->to_down, type, data, n))
+            overflowed(m, p, "downward");
+    }
 }
 
 /*
@@ -257,10 +371,10 @@ static void try_finish(struct mux *m, struct pair *p)
 
     if (c == NULL) {
         /* Nobody is waiting for what was held for the client. */
-        p->to_down.full = 0;
-        p->to_up.full = 0;
+        stash_clear(&p->to_down);
+        stash_clear(&p->to_up);
     }
-    if (p->to_up.full || p->to_down.full)
+    if (stash_waiting(&p->to_up) || stash_waiting(&p->to_down))
         return; /* flushed first, so nothing in flight is lost */
     if (p->pending)
         return; /* cannot close a channel that has no answer to its OPEN yet */
@@ -382,8 +496,11 @@ static void down_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *dat
 
     if (p == NULL || !p->up_open)
         return;
-    if (wl_peer_send(c->m->up, p->up, type, data, n) != WL_OK)
-        stash_put(&p->to_up, type, data, n);
+    if (stash_waiting(&p->to_up)
+        || wl_peer_send(c->m->up, p->up, type, data, n) != WL_OK) {
+        if (!stash_put(&p->to_up, type, data, n))
+            overflowed(c->m, p, "upward");
+    }
 }
 
 static void down_closed(void *ctx, uint16_t ch)
@@ -540,23 +657,36 @@ static int flush_stashes(struct mux *m, int *block_up, int *block_down)
 
         if (!p->used)
             continue;
-        if (p->to_up.full) {
-            if (p->up_open &&
-                wl_peer_send(m->up, p->up, p->to_up.type, p->to_up.buf, p->to_up.len) == WL_OK)
-                p->to_up.full = 0;
-            else
+        while (stash_waiting(&p->to_up)) {
+            const uint8_t *data;
+            uint8_t type;
+            size_t n;
+
+            if (!p->up_open || !stash_front(&p->to_up, &type, &data, &n)
+                || wl_peer_send(m->up, p->up, type, data, n) != WL_OK) {
                 block_down[p->client] = 1; /* its source must wait */
+                break;
+            }
+            stash_drop(&p->to_up);
         }
-        if (p->to_down.full && m->clients[p->client].used) {
-            if (wl_peer_send(m->clients[p->client].peer, p->local, p->to_down.type,
-                             p->to_down.buf, p->to_down.len) == WL_OK)
-                p->to_down.full = 0;
-            else
-                *block_up = 1;
-        } else if (p->to_down.full) {
-            p->to_down.full = 0; /* nobody left to give it to */
+        if (m->clients[p->client].used) {
+            while (stash_waiting(&p->to_down)) {
+                const uint8_t *data;
+                uint8_t type;
+                size_t n;
+
+                if (!stash_front(&p->to_down, &type, &data, &n)
+                    || wl_peer_send(m->clients[p->client].peer, p->local, type, data, n)
+                           != WL_OK) {
+                    *block_up = 1;
+                    break;
+                }
+                stash_drop(&p->to_down);
+            }
+        } else {
+            stash_clear(&p->to_down); /* nobody left to give it to */
         }
-        waiting = waiting || p->to_up.full || p->to_down.full;
+        waiting = waiting || stash_waiting(&p->to_up) || stash_waiting(&p->to_down);
     }
     return waiting;
 }

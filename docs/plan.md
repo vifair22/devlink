@@ -52,6 +52,21 @@ quick one while it runs, and requires the quick one to finish first with each
 channel's output whole and separate. It was checked against an agent given a
 single exec slot, where it fails.
 
+**What it has cost since.** Three defects, all found in use rather than by the
+tests, and all the same shape: something handled on one side only. A channel
+number held because the agent's CLOSE was answered without sending ours. A
+deferred close with a comment describing it and no code to finish it. Then a
+record dropped, which is the serious one: a large, highly compressible file
+through the multiplexer arrived 4 KiB short and failed its checksum, because
+records refused by the far side were kept in a stash of one and the next one
+overwrote it (`docs/bug-mux-drops-a-record.md`). Plain transfers were never
+affected.
+
+The pattern is worth naming. In each case a comment stated the invariant
+correctly and nothing enforced it. The backlog that replaced the stash is
+bounded by something provable rather than assumed, and overrunning it now ends
+the channel with a message instead of losing data quietly.
+
 ## Iteration 12: a window instead of a console
 
 Decided 2026-09-23. The agent is already a Win32 console PE; this makes it a

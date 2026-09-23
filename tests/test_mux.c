@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <poll.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cmocka.h>
@@ -15,6 +16,7 @@
 #include "devlink/agent.h"
 #include "devlink/client_exec.h"
 #include "devlink/clock.h"
+#include "devlink/file_ops.h"
 #include "devlink/mux.h"
 #include "devlink/proto.h"
 #include "devlink/usock.h"
@@ -33,6 +35,7 @@ static struct {
     struct wl_agent_cfg agent_cfg;
     struct wl_mux_cfg mux_cfg;
     char sock[128];
+    char dir[128];
     volatile int stop;
     /* Holds the agent back so the line is genuinely not up when a client
      * arrives. On a real 115200 line the handshake takes tens of milliseconds
@@ -83,6 +86,8 @@ static int setup_common(int agent_delay_ms)
     pty_pair(&h.agent_t, &h.line_t);
     (void)snprintf(h.sock, sizeof(h.sock), "/tmp/devlink-test-%ld.sock", (long)getpid());
     (void)remove(h.sock);
+    (void)snprintf(h.dir, sizeof(h.dir), "/tmp/devlink-mux-%ld", (long)getpid());
+    (void)mkdir(h.dir, 0700);
 
     h.agent_cfg.session = fast_session();
     h.agent_cfg.platform = WL_PLATFORM_LINUX;
@@ -119,6 +124,12 @@ static int teardown(void **state)
     wl_transport_close(&h.agent_t);
     wl_transport_close(&h.line_t);
     (void)remove(h.sock);
+    {
+        char cmd[256];
+
+        (void)snprintf(cmd, sizeof(cmd), "rm -rf %s", h.dir);
+        assert_int_equal(system(cmd), 0);
+    }
     return 0;
 }
 
@@ -383,6 +394,84 @@ static void test_channels_are_released_so_a_long_session_does_not_run_out(void *
     }
 }
 
+/* Long runs, so the line carries a fraction of the bytes the relay has to hand
+ * on: a bitmap of a mostly flat image, which is what found this. */
+static void write_compressible(const char *path, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    uint8_t run[4096];
+    size_t done = 0;
+
+    assert_non_null(f);
+    for (unsigned band = 0; done < n; band++) {
+        size_t want = n - done < sizeof(run) ? n - done : sizeof(run);
+
+        memset(run, (int)(band % 3U == 0U ? 0xFF : (band % 3U == 1U ? 0x00 : 0xC0)),
+               sizeof(run));
+        assert_int_equal(fwrite(run, 1, want, f), want);
+        done += want;
+    }
+    assert_int_equal(fclose(f), 0);
+}
+
+static void assert_identical(const char *a, const char *b)
+{
+    FILE *fa = fopen(a, "rb");
+    FILE *fb = fopen(b, "rb");
+    int ca;
+    int cb;
+
+    assert_non_null(fa);
+    assert_non_null(fb);
+    do {
+        ca = fgetc(fa);
+        cb = fgetc(fb);
+        assert_int_equal(ca, cb);
+    } while (ca != EOF);
+    (void)fclose(fa);
+    (void)fclose(fb);
+}
+
+/*
+ * A file big enough and compressible enough that the relay cannot hand records
+ * on as fast as the line delivers them, in both directions.
+ *
+ * This is the shape that was reported as "a checksum error on a large bitmap".
+ * The cause was neither the checksum nor the compression: a record the far side
+ * refused was held in a stash of one, and since records are dispatched from
+ * inside a single pump, the next refused record overwrote it. One 4 KiB chunk
+ * went missing from the middle of the file and nothing said so.
+ */
+static void test_a_large_compressible_transfer_loses_nothing(void **state)
+{
+    struct wl_session_cfg cfg = local_session();
+    struct wl_file_result r;
+    struct wl_transport t;
+    char local[256];
+    char remote[256];
+    char back[256];
+
+    (void)state;
+    (void)snprintf(local, sizeof(local), "%s/flat.bmp", h.dir);
+    (void)snprintf(remote, sizeof(remote), "%s/flat-sent.bmp", h.dir);
+    (void)snprintf(back, sizeof(back), "%s/flat-back.bmp", h.dir);
+    write_compressible(local, 2U << 20);
+    wait_for_the_line();
+
+    /* Up: the client feeds the relay faster than the line drains. */
+    assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+    assert_int_equal(wl_client_put(&t, &cfg, 0x9001U, local, remote, 1, 5000, &r), WL_OK);
+    wl_transport_close(&t);
+    assert_identical(local, remote);
+
+    /* Down: the line feeds the relay faster than the client drains, which is
+     * the direction the report came from. */
+    assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+    assert_int_equal(wl_client_get(&t, &cfg, 0x9002U, remote, back, 5000, &r), WL_OK);
+    wl_transport_close(&t);
+    assert_identical(local, back);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -397,6 +486,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(
             test_a_connection_that_closes_at_once_does_not_kill_the_multiplexer, setup,
             teardown),
+        cmocka_unit_test_setup_teardown(test_a_large_compressible_transfer_loses_nothing, setup,
+                                        teardown),
         cmocka_unit_test_setup_teardown(
             test_channels_are_released_so_a_long_session_does_not_run_out, setup, teardown),
     };

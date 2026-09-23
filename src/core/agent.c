@@ -1372,12 +1372,25 @@ static void put_end(struct agent *a, struct xfer *x, uint32_t want_crc)
         return;
     }
     x->f = NULL;
+    /* Both say the file did not arrive, but not for the same reason: a wrong
+     * count is the transport, a wrong sum over the right count is the bytes.
+     * The numbers go with it so the answer does not need a second attempt. */
     if (x->done != x->size) {
-        xfer_fail(a, x, WL_E_CRC, "wrong number of bytes received");
+        char msg[96];
+
+        (void)snprintf(msg, sizeof(msg), "wrong number of bytes: expected %llu, received %llu",
+                       (unsigned long long)x->size, (unsigned long long)x->done);
+        xfer_fail(a, x, WL_E_CRC, msg);
         return;
     }
     if (x->crc != want_crc) {
-        xfer_fail(a, x, WL_E_CRC, "checksum mismatch");
+        char msg[96];
+
+        (void)snprintf(msg, sizeof(msg),
+                       "checksum mismatch over %llu bytes: sent %08lx, received %08lx",
+                       (unsigned long long)x->done, (unsigned long)want_crc,
+                       (unsigned long)x->crc);
+        xfer_fail(a, x, WL_E_CRC, msg);
         return;
     }
     if (wl_fs_replace(x->tmp, x->path) != WL_OK) {

@@ -11,6 +11,7 @@
 
 #include <cmocka.h>
 
+#include "noisy_line.h"
 #include "pty_pair.h"
 #include "devlink/agent.h"
 #include "devlink/file_ops.h"
@@ -29,6 +30,7 @@ static struct {
 } agent;
 
 static struct wl_transport client_t;
+static struct noisy_line noise;
 static char dir[256];
 
 static void *agent_main(void *arg)
@@ -81,6 +83,23 @@ static int teardown(void **state)
     return 0;
 }
 
+/* The ordinary setup, with the client's side of the cable damaging one byte
+ * in every `every` so the link has to retransmit. */
+static int setup_noisy(void **state, uint32_t every)
+{
+    struct wl_transport raw;
+
+    assert_int_equal(setup(state), 0);
+    raw = client_t;
+    noisy_line(&noise, &raw, every, &client_t);
+    return 0;
+}
+
+static int setup_lossy(void **state)
+{
+    return setup_noisy(state, 2000U);
+}
+
 static void path_in(char *buf, size_t cap, const char *name)
 {
     (void)snprintf(buf, cap, "%s/%s", dir, name);
@@ -99,6 +118,31 @@ static void write_file(const char *path, size_t n, uint32_t seed)
         x ^= x << 5;
         /* Mostly text-like, so compression has something to do. */
         assert_int_equal(fputc((int)('a' + (x % 26U)), f), (int)('a' + (x % 26U)));
+    }
+    assert_int_equal(fclose(f), 0);
+}
+
+/*
+ * A big file of long runs, which is what an uncompressed bitmap of a mostly
+ * flat image is. It matters because the ratio, not the size, is what puts the
+ * pressure somewhere new: a few tens of kilobytes on the line carry megabytes
+ * of plaintext, so every buffer above the link fills far faster than the link
+ * drains, which is the opposite of the usual case.
+ */
+static void write_flat_bitmap(const char *path, size_t n)
+{
+    static const uint8_t shades[3] = {0xFF, 0x00, 0xC0};
+    FILE *f = fopen(path, "wb");
+    uint8_t run[4096];
+    size_t done = 0;
+
+    assert_non_null(f);
+    for (unsigned band = 0; done < n; band++) {
+        size_t want = n - done < sizeof(run) ? n - done : sizeof(run);
+
+        memset(run, shades[band % 3U], sizeof(run));
+        assert_int_equal(fwrite(run, 1, want, f), want);
+        done += want;
     }
     assert_int_equal(fclose(f), 0);
 }
@@ -295,10 +339,57 @@ static void test_put_missing_local_file(void **state)
     assert_int_not_equal(put("/nonexistent/local.txt", dst, 0, &r), WL_OK);
 }
 
+/* Reported from the target: a large, highly compressible file fails its
+ * checksum. The bitmaps under C:\\W2KINST are exactly that shape. */
+static void test_a_large_highly_compressible_file_arrives_whole(void **state)
+{
+    char local[512];
+    char remote[512];
+    char back[512];
+    struct wl_file_result r;
+
+    (void)state;
+    path_in(local, sizeof(local), "flat.bmp");
+    path_in(remote, sizeof(remote), "flat-sent.bmp");
+    path_in(back, sizeof(back), "flat-back.bmp");
+    write_flat_bitmap(local, 8U << 20);
+
+    assert_int_equal(put(local, remote, 0, &r), WL_OK);
+    assert_same_file(local, remote);
+    assert_int_equal(get(remote, back, &r), WL_OK);
+    assert_same_file(local, back);
+}
+
+/*
+ * The same file again, over a line that damages a byte every couple of
+ * thousand. Highly compressible data makes the frames very small, so the same
+ * damage rate lands on far more frames than a normal payload would, and the
+ * retransmission path carries the whole transfer rather than the odd frame.
+ */
+static void test_a_compressible_file_survives_a_line_that_loses_bytes(void **state)
+{
+    char local[512];
+    char remote[512];
+    struct wl_file_result r;
+
+    (void)state;
+    path_in(local, sizeof(local), "flat.bmp");
+    path_in(remote, sizeof(remote), "flat-sent.bmp");
+    write_flat_bitmap(local, 2U << 20);
+
+    assert_int_equal(put(local, remote, 0, &r), WL_OK);
+    assert_same_file(local, remote);
+    assert_true(noise.dropped + noise.flipped > 0);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test_setup_teardown(test_put_then_get_roundtrip, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_a_large_highly_compressible_file_arrives_whole,
+                                        setup, teardown),
+        cmocka_unit_test_setup_teardown(test_a_compressible_file_survives_a_line_that_loses_bytes,
+                                        setup_lossy, teardown),
         cmocka_unit_test_setup_teardown(test_empty_file, setup, teardown),
         cmocka_unit_test_setup_teardown(test_binary_file, setup, teardown),
         cmocka_unit_test_setup_teardown(test_put_refuses_to_overwrite_without_force, setup,
