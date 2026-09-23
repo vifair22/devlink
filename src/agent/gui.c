@@ -10,6 +10,7 @@
 #include "devlink/agent.h"
 #include "devlink/clock.h"
 #include "devlink/monitor.h"
+#include "devlink/paths.h"
 #include "devlink/proto.h"
 #include "devlink/transport.h"
 #include "devlink/version.h"
@@ -103,6 +104,14 @@ struct app {
     char port[32];
     unsigned long baud;
 
+    /* Replacing itself. The paths are taken once at startup, before anything
+     * is renamed, so they still name this program afterwards. */
+    char exe[WL_PATH_MAX];
+    char fresh[WL_PATH_MAX]; /* the upload waiting beside it */
+    char spent[WL_PATH_MAX]; /* what this build becomes */
+    int update_wanted;       /* the client sent @stop */
+    unsigned tidy_tries;     /* attempts to remove the previous build */
+
     /* What the window has already drawn, so a tick with nothing new costs
      * nothing: the generation for the list, the line count for the log. */
     uint32_t drawn_gen;
@@ -140,6 +149,11 @@ static void on_log(void *ctx, const char *msg)
 static void on_event(void *ctx, const struct wl_agent_event *e)
 {
     (void)ctx;
+    /* Noted on this thread and acted on by the window, which is where the
+     * process may be replaced: the loop has to finish and let the port go
+     * first. */
+    if (e->type == WL_EV_STOPPING)
+        app.update_wanted = 1;
     EnterCriticalSection(&app.lock);
     wl_monitor_event(app.mon, e);
     LeaveCriticalSection(&app.lock);
@@ -306,6 +320,101 @@ static const char *state_text(int state, const char *client)
     default:
         return app.running ? "Waiting for a client" : "Stopped";
     }
+}
+
+/* ---------------------------------------------------------------------------
+ * replacing itself
+ * ------------------------------------------------------------------------- */
+
+/*
+ * The console agent is restarted by AGENT.BAT, whose loop swaps in the upload
+ * once the old process has exited. A windowed program cannot borrow that
+ * without keeping a console on the desktop, so it does the swap itself.
+ *
+ * Windows will not let a running image be written over or deleted, but it will
+ * let one be renamed within the same volume: the section holds the contents,
+ * not the name. So this build steps aside under its own .OLD name, the upload
+ * takes its place, and the new file is started before this process exits. No
+ * helper program, and the build it replaced is left on disk, which is as much
+ * of a way back as this needs.
+ *
+ * Nothing here is reachable from the test suite; the part that can be wrong on
+ * its own is in wl_path_sibling, which is, and is tested.
+ */
+static int swap_in_the_update(void)
+{
+    char msg[WL_PATH_MAX + 64];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    char *cmd;
+    int started;
+
+    if (app.exe[0] == '\0' || app.fresh[0] == '\0' || app.spent[0] == '\0')
+        return 0;
+    if (GetFileAttributesA(app.fresh) == INVALID_FILE_ATTRIBUTES)
+        return 0; /* stopped, but with nothing waiting to take over */
+
+    (void)DeleteFileA(app.spent); /* whatever the last update left */
+    if (!MoveFileA(app.exe, app.spent)) {
+        (void)snprintf(msg, sizeof(msg), "cannot step aside (%lu); the update was not applied",
+                       GetLastError());
+        note(msg);
+        return 0;
+    }
+    if (!MoveFileA(app.fresh, app.exe)) {
+        (void)snprintf(msg, sizeof(msg), "cannot move the update in (%lu); putting this build back",
+                       GetLastError());
+        note(msg);
+        /* Back where it was, so the next start is this build rather than
+         * nothing at all. */
+        (void)MoveFileA(app.spent, app.exe);
+        return 0;
+    }
+
+    /*
+     * Started with the command line this process was given, so the port, the
+     * rate and -tray all survive the update. The image is named separately
+     * because the path in the command line is whatever was typed, which need
+     * not be the file that ran.
+     */
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    cmd = GetCommandLineA();
+    {
+        size_t n = strlen(cmd) + 1;
+        char *copy = malloc(n);
+
+        if (copy == NULL)
+            return 0;
+        memcpy(copy, cmd, n);
+        started = CreateProcessA(app.exe, copy, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi) != 0;
+        free(copy);
+    }
+    if (!started) {
+        (void)snprintf(msg, sizeof(msg), "the update is in place but would not start (%lu)",
+                       GetLastError());
+        note(msg);
+        (void)MessageBoxA(app.wnd, msg, "devlink", MB_ICONWARNING | MB_OK);
+        return 0;
+    }
+    (void)CloseHandle(pi.hThread);
+    (void)CloseHandle(pi.hProcess);
+    return 1;
+}
+
+/* The build this one replaced, once it has finished exiting. The first
+ * attempts fail: the old process is still on its way out while this one is
+ * starting, and Windows keeps the file locked until it has gone. */
+static void tidy_the_old_build(void)
+{
+    if (app.spent[0] == '\0' || app.tidy_tries >= 40U)
+        return;
+    if (GetFileAttributesA(app.spent) == INVALID_FILE_ATTRIBUTES) {
+        app.tidy_tries = 40U; /* gone; stop looking */
+        return;
+    }
+    app.tidy_tries++;
+    (void)DeleteFileA(app.spent);
 }
 
 /* ---------------------------------------------------------------------------
@@ -828,6 +937,7 @@ static LRESULT CALLBACK proc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
     case WM_TIMER:
         if (wparam == ID_TICK) {
             refresh();
+            tidy_the_old_build();
             /*
              * Closing gave the agent a bounded wait; past it, leave rather
              * than keep a window that will not shut. This exits the process
@@ -888,7 +998,34 @@ static LRESULT CALLBACK proc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
         app.running = 0;
         app.stopping = 0;
+        /*
+         * Back to nothing attached and nothing running. The loop ending is not
+         * something the model can see for itself: it learns a client has gone
+         * from a transition the loop notices, and there is no loop any more, so
+         * without this the status bar goes on naming the last client that was
+         * connected before the agent was stopped.
+         */
+        EnterCriticalSection(&app.lock);
+        wl_monitor_reset(app.mon);
+        LeaveCriticalSection(&app.lock);
         refresh();
+        /*
+         * Only now, with the loop finished and the port released, is it safe
+         * to be replaced: the successor opens the same port as this one exits.
+         * A @stop with no upload waiting is just a stop, and the window stays
+         * up with Start available.
+         */
+        if (app.update_wanted) {
+            app.update_wanted = 0;
+            if (swap_in_the_update()) {
+                if (app.in_tray) {
+                    tray_send(NIM_DELETE);
+                    app.in_tray = 0;
+                }
+                ExitProcess(0);
+            }
+            note("@stop arrived with nothing waiting to replace this build");
+        }
         if (app.closing)
             (void)DestroyWindow(wnd);
         return 0;
@@ -971,6 +1108,14 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 
     app.inst = inst;
     parse_args(cmd);
+    /* Taken before anything is renamed, so they still name this program when
+     * it is time to step aside. */
+    if (GetModuleFileNameA(NULL, app.exe, sizeof(app.exe)) > 0) {
+        if (!wl_path_sibling(app.exe, ".NEW", app.fresh, sizeof(app.fresh)))
+            app.fresh[0] = '\0';
+        if (!wl_path_sibling(app.exe, ".OLD", app.spent, sizeof(app.spent)))
+            app.spent[0] = '\0';
+    }
     app.mon = wl_monitor_new();
     if (app.mon == NULL) {
         (void)MessageBoxA(NULL, "Out of memory.", "devlink", MB_ICONERROR | MB_OK);

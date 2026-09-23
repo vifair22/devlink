@@ -33,7 +33,11 @@ enum {
     WL_EV_GONE,        /* the session ended, by restart or by liveness */
     WL_EV_CHANNEL,     /* work started: ch, kind, text, and total if known */
     WL_EV_PROGRESS,    /* ch, done: bytes so far, counted from the start */
-    WL_EV_FINISHED     /* ch, and code: an exit status for WL_KIND_EXEC */
+    WL_EV_FINISHED,    /* ch, and code: an exit status for WL_KIND_EXEC */
+    /* @stop: the client asked the agent to exit, which is how an update is
+     * applied. A front end that replaces itself needs to tell this apart from
+     * being stopped at the keyboard, and the two are the same to the loop. */
+    WL_EV_STOPPING
 };
 
 struct wl_agent_event {

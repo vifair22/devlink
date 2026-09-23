@@ -73,6 +73,17 @@ Do not copy a new binary over by hand. The workstation does this:
     devlink put build/bin/DEVLINK.EXE C:/DEVLINK/DEVLINK.NEW --force
     devlink exec @stop
 
+The windowed agent updates the same way, under its own name:
+
+    devlink put build/bin/DEVLINKW.EXE C:/DEVLINK/DEVLINKW.NEW --force
+    devlink exec @stop
+
+It has no launcher behind it and needs none: on @stop it renames itself to
+DEVLINKW.OLD, moves the upload into place and starts it. The command line
+carries over, so an agent running with -tray stays in the tray afterwards.
+DEVLINKW.OLD is the build it replaced, kept as the way back, and normally
+tidied up a few seconds later.
+
 The agent exits, AGENT.BAT moves DEVLINK.NEW into place, and serving
 resumes within a few seconds. Confirm with "devlink info", which prints the
 build the agent is actually running.

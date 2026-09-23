@@ -143,10 +143,32 @@ shortcut wants. A File and Help menu, and Copy line, Copy all and Clear on the
 log, because the message worth having is usually an error and the alternative
 is reading it off the target's screen.
 
-**Still to do.** Self-replacement for the windowed agent, which cannot use
-AGENT.BAT's trick of a loop around a console program without keeping a console
-on the desktop; the Startup shortcut on the target; and a deployment, which is
-the user's to clear.
+**Replacing itself.** AGENT.BAT restarts the console agent and swaps the
+upload in once it has exited; a windowed program cannot borrow that without
+keeping a console on the desktop. It does the swap itself instead, and the
+trick that makes it possible without a helper program is that Windows will not
+let a running image be written over or deleted but will let one be renamed
+within the same volume. On `@stop`, once the loop has finished and the port is
+free, it steps aside as `DEVLINKW.OLD`, moves `DEVLINKW.NEW` into place and
+starts it with the command line it was given, so the port, the rate and
+`-tray` survive. The successor deletes the old build once it has finished
+exiting, and the next update clears it if that did not work; either way it is
+the way back from a bad build. An `@stop` with nothing waiting is just a stop.
+
+The path arithmetic is the part that can be wrong on its own, so it is
+`wl_path_sibling` in the core with tests, rather than a `strrchr` at the call
+site that treats a dot in a directory name as an extension.
+
+Proved under Wine on a headless display: two builds with different ids, the
+update applied by `@stop`, the successor answering as the new build with the
+old one cleaned up; the same again started with `-tray`, still hidden
+afterwards; and `@stop` with nothing waiting leaving the window up and
+`Start` available. What that does not prove is the permission itself, since
+renaming an open file is something Linux always allows. On NT it is the image
+section that pins the contents, not the name.
+
+**Still to do.** The Startup shortcut on the target, and a deployment, which
+is the user's to clear.
 
 ### Two defects found while looking at the window
 

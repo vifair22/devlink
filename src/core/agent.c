@@ -641,6 +641,7 @@ static int agent_command(struct agent *a, uint16_t ch, const char *cmd, struct e
     (void)wl_peer_close(a->peer, ch);
     a->stopping = 1;
     log_line(a, "stopping at the client's request", "");
+    emit_at(a, WL_EV_STOPPING, ch, 0);
     return 0;
 }
 

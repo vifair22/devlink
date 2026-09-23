@@ -661,6 +661,35 @@ starts it again. The whole cycle takes under ten seconds. If the new agent
 fails to start, the launcher loops trying to run it; recover at the target's
 keyboard.
 
+**Updating the windowed agent** is the same exchange with its own name:
+
+```sh
+devlink put build/bin/DEVLINKW.EXE C:/DEVLINK/DEVLINKW.NEW --force
+devlink exec @stop
+sleep 7
+devlink info          # confirm the new build version
+```
+
+There is no launcher behind this one and none is needed. On `@stop`, once the
+loop has finished and the port is free, the agent looks beside itself for
+`DEVLINKW.NEW`; if it is there, it renames itself to `DEVLINKW.OLD`, moves the
+upload into place and starts it before exiting.
+
+Windows will not let a running program be written over or deleted, but it will
+let one be renamed within the same volume, which is what makes this work
+without a helper program. The command line is carried across, so the port, the
+rate and `-tray` all survive an update: an agent that was sitting in the
+notification area is still there afterwards.
+
+`DEVLINKW.OLD` is the build that was replaced, and it is left on disk. The
+successor deletes it once the old process has finished exiting, so it is
+normally gone within a few seconds; if the old process is slow, it stays until
+the next update clears it. Either way it is the way back if a new build turns
+out to be bad: stop the agent and rename it over `DEVLINKW.EXE`.
+
+An `@stop` with nothing waiting beside it is simply a stop. Serving ends, the
+window stays, and `Start` begins again.
+
 **Updating the client** is a rebuild.
 
 **Version mismatch.** Client and agent must speak the same protocol version,
