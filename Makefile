@@ -163,7 +163,15 @@ $(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) | $(BIN_DIR)
 TEST_SOURCES := $(wildcard $(TEST_DIR)/test_*.c)
 TEST_BINS    := $(patsubst $(TEST_DIR)/test_%.c,$(BIN_DIR)/test_%,$(TEST_SOURCES))
 
-$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(ZLIB_LIB) | $(BIN_DIR)
+# A test binary is built in one step, so there are no .d files to include and
+# make cannot infer the headers. Listing them matters more here than anywhere
+# else: without them, changing a header leaves every test binary stale, and a
+# test that should now fail keeps passing. That happened while proving the
+# concurrency test discriminates, which is the one job a stale test binary
+# cannot do.
+TEST_DEPS := $(wildcard $(INC_DIR)/w98link/*.h) $(wildcard $(TEST_DIR)/*.h)
+
+$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(TEST_DEPS) $(ZLIB_LIB) | $(BIN_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
 	    -pthread -I$(TEST_DIR) -o $@ $< $(LIB_SOURCES) $(ZLIB_LIB) -lcmocka
 
@@ -198,7 +206,7 @@ coverage:
 
 COV_BINS := $(patsubst $(TEST_DIR)/test_%.c,$(BUILD_DIR)/coverage/test_%,$(TEST_SOURCES))
 
-$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(ZLIB_LIB)
+$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(TEST_DEPS) $(ZLIB_LIB)
 	@mkdir -p $(BUILD_DIR)/coverage
 	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -I$(TEST_DIR) \
 	    -pthread -o $@ $< $(LIB_SOURCES) $(ZLIB_LIB) -lcmocka

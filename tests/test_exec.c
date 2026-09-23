@@ -612,6 +612,144 @@ static void test_agent_time_rejects_nonsense(void **state)
     assert_int_equal(r.fail_code, WL_E_UNKNOWN);
 }
 
+/* ---------------------------------------------------------------------------
+ * two commands at once on one session
+ * ------------------------------------------------------------------------- */
+
+struct multi {
+    uint16_t ch[2];
+    int opened[2];
+    char out[2][4096];
+    size_t out_len[2];
+    int exited[2];
+    uint32_t code[2];
+    uint32_t exit_ms[2];
+};
+
+static int multi_index(const struct multi *m, uint16_t ch)
+{
+    if (m->ch[0] == ch)
+        return 0;
+    if (m->ch[1] == ch)
+        return 1;
+    return -1;
+}
+
+static void multi_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char *msg,
+                         size_t n)
+{
+    struct multi *m = ctx;
+    int i = multi_index(m, ch);
+
+    (void)code;
+    (void)msg;
+    (void)n;
+    if (i >= 0)
+        m->opened[i] = ok ? 1 : -1;
+}
+
+static void multi_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, size_t n)
+{
+    struct multi *m = ctx;
+    int i = multi_index(m, ch);
+
+    if (i < 0)
+        return;
+    if (type == WL_EXEC_STDOUT) {
+        assert_true(m->out_len[i] + n < sizeof(m->out[i]));
+        memcpy(m->out[i] + m->out_len[i], p, n);
+        m->out_len[i] += n;
+    } else if (type == WL_EXEC_EXIT && n == 4) {
+        m->code[i] = wl_get_u32le(p);
+        m->exit_ms[i] = wl_clock_ms();
+        m->exited[i] = 1;
+    }
+}
+
+/*
+ * The mux, the agent's eight exec slots and the per-channel credit windows are
+ * all designed for several commands at once, but nothing had ever run two.
+ * This is the foundation a local multiplexing daemon would stand on, so it is
+ * worth proving before anything is built on it: a second command must open
+ * while the first is still running, finish on its own schedule, and keep its
+ * output to its own channel.
+ */
+static void test_two_commands_run_at_once_on_one_session(void **state)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_peer_handlers h;
+    struct wl_peer *p;
+    struct multi m;
+    uint8_t args[128];
+    struct wl_wbuf w;
+    uint32_t start;
+
+    (void)state;
+    memset(&m, 0, sizeof(m));
+    memset(&h, 0, sizeof(h));
+    h.ctx = &m;
+    h.opened = multi_opened;
+    h.record = multi_record;
+    p = wl_peer_new(&cfg, 61616, wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
+    assert_non_null(p);
+    start = wl_clock_ms();
+    while (!wl_peer_ready(p) && wl_clock_since(start) < 3000U)
+        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+    assert_true(wl_peer_ready(p));
+
+    /* The slow one first: three lines about a second apart. */
+    {
+        const char *slow = "for i in 1 2 3; do echo A$i; sleep 0.3; done";
+
+        /* strlen, not a counted literal: a length one short here truncates the
+         * loop and the shell answers with a syntax error instead of running
+         * anything, which is a confusing way to fail a concurrency test. */
+        wl_wbuf_init(&w, args, sizeof(args));
+        wl_w_str(&w, slow, strlen(slow));
+        wl_w_str(&w, "", 0);
+        wl_w_u8(&w, 0);
+    }
+    assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &m.ch[0]), WL_OK);
+    start = wl_clock_ms();
+    while (m.opened[0] == 0 && wl_clock_since(start) < 3000U)
+        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+    assert_int_equal(m.opened[0], 1);
+    (void)wl_peer_send(p, m.ch[0], WL_EXEC_STDIN_EOF, NULL, 0);
+
+    /* The quick one, opened while the first is still going. */
+    wl_wbuf_init(&w, args, sizeof(args));
+    wl_w_str(&w, "echo B", strlen("echo B"));
+    wl_w_str(&w, "", 0);
+    wl_w_u8(&w, 0);
+    assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &m.ch[1]), WL_OK);
+    assert_int_not_equal(m.ch[0], m.ch[1]);
+    start = wl_clock_ms();
+    while (m.opened[1] == 0 && wl_clock_since(start) < 3000U)
+        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+    assert_int_equal(m.opened[1], 1);
+    (void)wl_peer_send(p, m.ch[1], WL_EXEC_STDIN_EOF, NULL, 0);
+    assert_false(m.exited[0]); /* the slow one cannot be done yet */
+
+    start = wl_clock_ms();
+    while ((!m.exited[0] || !m.exited[1]) && wl_clock_since(start) < 10000U)
+        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+    assert_true(m.exited[0]);
+    assert_true(m.exited[1]);
+    assert_int_equal(m.code[0], 0);
+    assert_int_equal(m.code[1], 0);
+
+    /* Each channel kept its own output, whole and in order. */
+    assert_int_equal(m.out_len[0], 9);
+    assert_memory_equal(m.out[0], "A1\nA2\nA3\n", 9);
+    assert_int_equal(m.out_len[1], 2);
+    assert_memory_equal(m.out[1], "B\n", 2);
+
+    /* And the quick one really did not wait for the slow one: that is the
+     * difference between a mux and a queue. */
+    assert_true(m.exit_ms[1] < m.exit_ms[0]);
+    wl_peer_free(p);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -644,6 +782,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_agent_time_will_not_set_the_clock_here, setup,
                                         teardown),
         cmocka_unit_test_setup_teardown(test_agent_time_rejects_nonsense, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_two_commands_run_at_once_on_one_session, setup,
+                                        teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

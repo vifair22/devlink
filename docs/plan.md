@@ -17,6 +17,39 @@ is only needed once there is an agent feature to try.
 | 8 | `sync`: hash manifests, send only changed files | done: 50-file tree, no changes, syncs in 0.25 s |
 | 9 | TCP transport | same features over the new NIC |
 | 10 | Windows 2000 pass | full suite against a 2000 agent, and the NT-only improvements below |
+| 11 | Local multiplexer | several commands at once from separate terminals, over one session |
+
+## Iteration 11: running more than one command at a time
+
+Decided 2026-09-23. The wire protocol already multiplexes: channels, per-channel
+credit, round-robin between them, and eight exec slots in the agent. What
+prevents two commands is above it. Every `w98link` invocation is a process that
+opens the port, handshakes, runs one command and exits, and the agent serves one
+session, so a second invocation *displaces* the first and kills whatever it was
+running. That has cost a running install.
+
+The fix is local and needs no protocol or agent change: one process owns the
+port and keeps a single session, and each `w98link` invocation talks to it over
+a Unix socket, getting its own channel. Two side benefits, neither small: the
+per-command handshake disappears, and so does the per-command deflate stream, so
+compression context survives across commands instead of restarting from nothing
+on a line where that is the scarce resource.
+
+**Concurrency only, no detach** (the user's choice, and it keeps this small): a
+channel dies with its client, so Ctrl-C or a closed terminal kills the remote
+command exactly as it does today. Keeping a command alive across client exits
+would need job ids and a registry in the daemon, which was considered and turned
+down when recovery was discussed.
+
+Known cost: a bulk `put` and an interactive `exec` sharing 11 KB/s means the
+`exec` feels slow. Round-robin makes that fair rather than starved; per-channel
+priority is a later question, if it turns out to matter.
+
+The foundation is proved before anything is built on it:
+`test_two_commands_run_at_once_on_one_session` opens a slow command, opens a
+quick one while it runs, and requires the quick one to finish first with each
+channel's output whole and separate. It was checked against an agent given a
+single exec slot, where it fails.
 
 ## Targets
 
