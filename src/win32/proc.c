@@ -253,9 +253,25 @@ wl_status wl_proc_start(const char *cmd, const char *cwd, int merge_stderr,
         return s;
     }
 
+    /*
+     * No console for the child, by both of the means the two platforms offer.
+     *
+     * With no flags at all a child inherits its parent's console, which is
+     * invisible on the console agent and free. The windowed agent has no
+     * console to inherit, so Windows would give each child a fresh one and a
+     * black box would flash on the target every time anything ran. NT answers
+     * that with CREATE_NO_WINDOW, which 9x ignores; 9x answers it with a
+     * hidden show command, which NT does not need. Setting both makes the two
+     * front ends behave alike, which is worth more than the one thing this
+     * gives up: a Ctrl-C at the console agent's window no longer reaches the
+     * children, because they are no longer in its console group. Nothing
+     * depended on that. Commands are ended through wl_proc_free, deliberately
+     * and with a bounded wait, and always were.
+     */
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     si.hStdInput = child_in;
     si.hStdOutput = child_out;
     si.hStdError = merge_stderr ? child_out : child_err;
@@ -279,7 +295,7 @@ wl_status wl_proc_start(const char *cmd, const char *cwd, int merge_stderr,
             if (copy == NULL)
                 continue;
             memcpy(copy, tries[i], try_len);
-            started = CreateProcessA(NULL, copy, NULL, NULL, TRUE, 0, NULL,
+            started = CreateProcessA(NULL, copy, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
                                      cwd != NULL && cwd[0] != '\0' ? cwd : NULL, &si,
                                      &pi) != 0;
             free(copy);

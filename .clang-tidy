@@ -1,4 +1,4 @@
-# clang-tidy configuration for w98link.
+# clang-tidy configuration for devlink.
 #
 # The enabled set is the checks that find real defects in C: the static
 # analyser, the bugprone family, CERT's security rules, and the performance
@@ -33,6 +33,7 @@ Checks: >
   -bugprone-multi-level-implicit-pointer-conversion,
   -readability-implicit-bool-conversion,
   -readability-trailing-comma,
+  -performance-no-int-to-ptr,
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '(include|src)/.*\.h$'
@@ -114,6 +115,14 @@ CheckOptions:
 #   last initializer. It arrived in a later clang-tidy and was swept in by the
 #   readability-* glob, so it can appear as a pile of new errors on a machine
 #   with a newer LLVM without anything in the code having changed.
+#
+# performance-no-int-to-ptr
+#   Win32 passes every message parameter as an integer, so a window procedure
+#   that reads a structure out of an LPARAM has to cast one to a pointer, and a
+#   control id goes into CreateWindow's HMENU the same way. The check is right
+#   in general and inapplicable to this API: the casts are the interface, not a
+#   place where a pointer was stored in an int by mistake. Only the windowed
+#   agent has any.
 #
 # bugprone-signed-bitwise.IgnorePositiveIntegerLiterals
 #   Not an exclusion: the check stays on. The bit work here is on protocol

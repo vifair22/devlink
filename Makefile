@@ -35,7 +35,15 @@ BIN_DIR   := $(BUILD_DIR)/bin
 # per side, and never includes the other side's headers.
 CORE_SOURCES   := $(wildcard $(SRC_DIR)/core/*.c)
 CLIENT_SOURCES := $(wildcard $(SRC_DIR)/client/*.c) $(wildcard $(SRC_DIR)/posix/*.c)
-AGENT_SOURCES  := $(wildcard $(SRC_DIR)/agent/*.c) $(wildcard $(SRC_DIR)/win32/*.c)
+# Two front ends over one agent: a console one and a windowed one. Everything
+# but the entry file is shared, so only the last source and the link target
+# differ between them.
+AGENT_ENTRY    := $(SRC_DIR)/agent/main.c
+AGENTW_ENTRY   := $(SRC_DIR)/agent/gui.c
+AGENT_SHARED   := $(filter-out $(AGENT_ENTRY) $(AGENTW_ENTRY),\
+                  $(wildcard $(SRC_DIR)/agent/*.c)) $(wildcard $(SRC_DIR)/win32/*.c)
+AGENT_SOURCES  := $(AGENT_ENTRY) $(AGENT_SHARED)
+AGENTW_SOURCES := $(AGENTW_ENTRY) $(AGENT_SHARED)
 
 # Vendored zlib: built once with its own flags into an archive, never subject
 # to this project's warnings, analysis or coverage (third_party/zlib/VENDORED.md).
@@ -132,15 +140,35 @@ WAT_ENV  := WATCOM=$(WATCOM) INCLUDE=$(WATCOM)/h:$(WATCOM)/h/nt \
             PATH=$(WATCOM)/binl64:$(WATCOM)/binl:$$PATH
 WAT_DIR  := $(BUILD_DIR)/agent
 AGENT    := $(BIN_DIR)/DEVLINK.EXE
+AGENTW   := $(BIN_DIR)/DEVLINKW.EXE
 
-# -bt=nt/-l=nt is Watcom's Win32 console target, which covers Win9x as well as
-# NT. -za99 is its C99 mode; -w4 -we is the closest it has to -Wall -Werror.
-# -k sets the main thread's stack explicitly (1 MiB) rather than trusting the
-# linker default; a few functions keep a maximum-size record on the stack.
-WAT_FLAGS := -q -bt=nt -l=nt -za99 -w4 -we -ox -k1048576 -I$(INC_DIR) \
+# -bt=nt is Watcom's Win32 target, which covers Win9x as well as NT; the
+# subsystem comes from -l=nt or -l=nt_win in the link rules below. -za99 is its
+# C99 mode; -w4 -we is the closest it has to -Wall -Werror. -k sets the main
+# thread's stack explicitly (1 MiB) rather than trusting the linker default; a
+# few functions keep a maximum-size record on the stack.
+WAT_FLAGS := -q -bt=nt -za99 -w4 -we -ox -k1048576 -I$(INC_DIR) \
              '-dDEVLINK_VERSION="$(VERSION)_$(BUILD_ID).agent"'
 
-agent: $(AGENT)
+agent: $(AGENT) $(AGENTW)
+
+# Resources, shared by both binaries: the icon and a version block. The icon is
+# drawn at build time rather than committed, so nothing in the repository is a
+# binary nobody can review. VERSIONINFO wants four numbers, which is the semver
+# with a build field of zero after it.
+comma    := ,
+WAT_ICON := $(WAT_DIR)/devlink.ico
+WAT_RES  := $(WAT_DIR)/devlink.res
+VER_COMMA := $(subst .,$(comma),$(VERSION)),0
+
+$(WAT_ICON): tools/make_icon.py
+	@mkdir -p $(dir $@)
+	@$(PYTHON) tools/make_icon.py $@
+
+$(WAT_RES): $(SRC_DIR)/agent/devlink.rc $(WAT_ICON) release_version
+	@mkdir -p $(dir $@)
+	$(WAT_ENV) wrc -q -r -bt=nt -i=$(WAT_DIR) -dDEVLINK_VER_COMMA="$(VER_COMMA)" \
+	    '-dDEVLINK_VER_TEXT="$(VERSION)_$(BUILD_ID)"' -fo=$@ $<
 
 WAT_ZLIB_FLAGS := -q -bt=nt -za99 -w0 -ox -I$(ZLIB_DIR)
 WAT_ZLIB_OBJS  := $(patsubst $(ZLIB_DIR)/%.c,$(WAT_DIR)/zlib/%.obj,$(ZLIB_SOURCES))
@@ -151,10 +179,33 @@ $(WAT_DIR)/zlib/%.obj: $(ZLIB_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(WAT_ENV) wcl386 -c $(WAT_ZLIB_FLAGS) -fo=$@ $<
 
-$(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) | $(BIN_DIR)
+$(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) $(WAT_RES) | $(BIN_DIR)
 	@mkdir -p $(WAT_DIR)
-	$(WAT_ENV) wcl386 $(WAT_FLAGS) -I$(ZLIB_DIR) -fo=$(WAT_DIR)/ -fe=$@ \
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt -I$(ZLIB_DIR) -fo=$(WAT_DIR)/ -fe=$@ \
 	    $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS)
+	$(WAT_ENV) wrc -q -bt=nt $(WAT_RES) $@
+	@chmod 755 $@
+
+# -l=nt_win is the same Win32 target with the windowed subsystem bit, and its
+# default library list already carries comctl32 and shell32. Its objects go in
+# their own directory: the same core file compiled for either front end has the
+# same object name, and sharing the directory would mean each build overwriting
+# the other's and neither being rebuilt when only the entry file changed.
+$(AGENTW): $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_ZLIB_OBJS) $(WAT_RES) | $(BIN_DIR)
+	@mkdir -p $(WAT_DIR)/win
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt_win -I$(ZLIB_DIR) -fo=$(WAT_DIR)/win/ -fe=$@ \
+	    $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_ZLIB_OBJS)
+	$(WAT_ENV) wrc -q -bt=nt $(WAT_RES) $@
+	@chmod 755 $@
+
+# A look at the windowed agent without a Windows machine: Wine draws it on a
+# headless X server and the framebuffer becomes a PNG. Nothing in DEVLINKW.EXE
+# is reachable from the test suite, so this is how it is checked at all. Wine
+# and Xvfb are not build dependencies and this is in no gate; it skips itself
+# where they are missing.
+.PHONY: gui-preview
+gui-preview: $(AGENTW)
+	@tools/gui-preview.sh $(BUILD_DIR)/preview/agent.png
 
 # ---------------------------------------------------------------------------
 # tests
@@ -201,9 +252,9 @@ test-junit: $(TEST_BINS)
 # flash drive (make dist DEST=/run/media/me/STICK).
 DEST ?= $(BUILD_DIR)/dist
 
-dist: $(AGENT)
+dist: $(AGENT) $(AGENTW)
 	@mkdir -p $(DEST)/DEVLINK
-	cp $(AGENT) $(DEST)/DEVLINK/
+	cp $(AGENT) $(AGENTW) $(DEST)/DEVLINK/
 	cp dist/AGENT.BAT dist/README.TXT $(DEST)/DEVLINK/
 	@echo "staged in $(DEST)/DEVLINK: copy that folder to C:\\ on the target"
 
@@ -283,7 +334,7 @@ tidy:
 	    echo "== win32: skipped, no mingw-w64 headers found (install them to lint it)"; \
 	else \
 	    echo "== win32"; \
-	    echo $(AGENT_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	    echo $(sort $(AGENT_SOURCES) $(AGENTW_SOURCES)) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
 	        clang-tidy {} -- --target=i686-w64-mingw32 $(WIN_TIDY_INC) \
 	        -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_WIN32_WINNT=0x0500 -DVARIANT=tidy \
 	        -DDEVLINK_VERSION='"0.0.0_tidy"' -std=c11 -Wno-cast-qual; \

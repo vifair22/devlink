@@ -17,6 +17,34 @@ Installing
    USER32, and it writes nothing outside the directories a client names.
 
 
+In a window instead
+-------------------
+
+DEVLINKW.EXE is the same agent with a window. Run it and it starts serving
+at once, on COM1 at 115200 unless told otherwise (DEVLINKW COM2 115200).
+
+Minimising it puts it in the notification area by the clock, where the
+tooltip says whether a client is connected and a right-click gives Open,
+Start, Stop and Exit. "DEVLINKW -tray" starts it there, which is what a
+shortcut in Startup wants.
+
+Right-clicking the log gives Copy line and Copy all, which beats reading an
+error off this screen and typing it in somewhere else.
+
+The window shows what the agent is doing now, which the console cannot: one
+line per command or transfer in progress, with bytes moved and elapsed time,
+since one client can run several at once. Below that is the same log the
+console prints, and along the bottom, who is connected and the totals.
+
+Stop releases the port; Start takes it again. Both take a moment, because the
+agent finishes what it is doing and shuts its commands down properly rather
+than being cut off. Closing the window does the same.
+
+Use whichever suits. The console one is what AGENT.BAT runs and what the
+diagnostics below need; the windowed one is easier to leave running and to
+glance at.
+
+
 Running
 -------
 
@@ -63,9 +91,10 @@ These are diagnostics only; the workstation has matching commands.
 Notes for this machine
 ----------------------
 
-The A21m has one 16550A at 3F8/IRQ4, which is COM1. 115200 is what the
-cable and the 98 driver would carry; Windows 2000's driver may go faster,
-and that is worth trying once the link is up, because it is free throughput.
+The A21m has one 16550A at 3F8/IRQ4, which is COM1, and 115200 is as fast as
+it goes. That is not a driver limit to be worked around: the chip divides a
+1.8432 MHz clock by 16 and then by an integer, and 115200 is what a divisor
+of 1 gives. There is no half a divisor, so the next rate up does not exist.
 
 TCP is not built yet. When the Intel PRO/100 card arrives the same agent
 will gain a network mode; until then the cable is the only route.

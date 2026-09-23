@@ -90,12 +90,16 @@ checksum are in `third_party/zlib/VENDORED.md`.
 
 ## 4. Installing on the target
 
-The agent is one executable plus a launcher batch file. Getting the first copy
+The agent is two executables plus a launcher batch file. Getting the first copy
 across needs some existing channel: a USB stick, a network share, or Kermit.
 After that the agent updates itself over its own link (section 11).
 
-1. Copy `build/bin/DEVLINK.EXE` to a directory on the target, for example
-   `C:\DEVLINK`.
+`DEVLINK.EXE` is the console agent and `DEVLINKW.EXE` is the same agent in a
+window (section 5). They are built from one set of sources and either one can
+serve; nothing on the workstation can tell which is answering.
+
+1. Copy `build/bin/DEVLINK.EXE` and `build/bin/DEVLINKW.EXE` to a directory on
+   the target, for example `C:\DEVLINK`.
 2. Create `C:\DEVLINK\AGENT.BAT`:
 
    ```
@@ -142,6 +146,60 @@ launcher can restart it, which is how an update is applied.
 **Console output.** Each line is timestamped: sessions starting, commands
 run, transfers, and failures. It is the first place to look when the client
 reports something odd.
+
+### The agent in a window
+
+```
+DEVLINKW [-tray] [PORT] [BAUD]   defaults: COM1 115200
+```
+
+`DEVLINKW.EXE` serves exactly as `DEVLINK serve` does, with a window instead
+of a console. It starts serving as soon as it opens, so it can go in Startup
+and be left alone.
+
+The window is in three parts:
+
+- **What is running now**, one line per live piece of work: the kind
+  (`command`, `sending`, `receiving`, `sync`), the command line or the path,
+  how many bytes have moved, and for how long. This is the part a console
+  cannot show. Since the multiplexer landed, one session can carry eight
+  commands, four transfers and a sync at once, and a scrolling log can only
+  report what has already happened.
+- **The log**, the same timestamped lines the console prints, with about 500
+  lines of scrollback. It follows the newest line unless you select one, which
+  is taken to mean you are reading rather than watching.
+- **The status bar**: who is connected, the port and rate, and the totals for
+  this run.
+
+`Stop` ends serving and releases the port, and `Start` begins again. Stopping
+is cooperative: the agent finishes the exchange it is in, unwinds its commands
+and transfers, and then lets go, so it takes a moment rather than being
+immediate. Closing the window does the same before it exits, and gives up after
+eight seconds rather than refusing to close.
+
+**Out of the way.** Minimising puts it in the notification area and takes it
+off the taskbar; double-clicking the tray icon brings it back, and
+right-clicking it gives Open, Start, Stop and Exit without opening the window
+at all. The tooltip carries the same line as the left of the status bar, so
+hovering says whether a client is connected.
+
+`-tray` starts it there directly, which is what a shortcut in Startup wants:
+serving from the moment someone logs in, with no window in front of whoever is
+sitting at the machine.
+
+**Copying a line out.** Right-clicking the log gives Copy line, Copy all and
+Clear. Worth knowing about when something has gone wrong: the alternative to
+copying the message is reading it off the target's screen and typing it
+somewhere else, which is how an error gets reported approximately instead of
+exactly. Clear empties the pane only; nothing that arrives afterwards is
+lost.
+
+**Which one to run.** Either. Reasons to prefer the window: you want to see
+what the agent is doing at a glance, or you want it started at login without a
+console window on the desktop. Reasons to prefer the console: `echo` and
+`linktest` (section 9) are console-only, and a windowed program on Windows
+2000 cannot write to the console that started it, which is why the two are
+separate programs rather than one.
 
 ## 6. Client commands
 

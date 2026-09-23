@@ -30,6 +30,8 @@ struct exec {
     uint32_t code;
     int exit_sent;
     int close_sent;
+    uint64_t out_total; /* output bytes the client has taken, for a display */
+    uint64_t reported;  /* out_total as last reported, so an idle command is quiet */
     uint8_t *stdin_q; /* client bytes the process has not taken yet */
     size_t stdin_len;
     int stdin_eof;
@@ -54,6 +56,7 @@ struct xfer {
     uint64_t size;
     uint64_t mtime;
     uint64_t done;
+    uint64_t reported; /* done as last reported, so an idle transfer is quiet */
     uint32_t crc;
     int failed;
     int finished; /* DONE or FAIL queued */
@@ -132,7 +135,8 @@ struct agent {
      * commands, and running out of slots used to mean falling back to the
      * blocking teardown, which is the thing being avoided. */
     struct reaping *reaping;
-    int stopping; /* @stop received: finish the exchange, then return */
+    int stopping;  /* @stop received: finish the exchange, then return */
+    int was_ready; /* a client was attached as of the last loop iteration */
 };
 
 /* One line to the console: a fixed prefix and a variable part. */
@@ -146,8 +150,56 @@ static void log_line(struct agent *a, const char *prefix, const char *detail)
     a->cfg->log(a->cfg->log_ctx, buf);
 }
 
+/*
+ * The same moment, in the structured form a display needs. This sits beside
+ * log_line because the two always report together: a moment that reaches only
+ * one of them is a bug in whichever was forgotten.
+ */
+static void emit(struct agent *a, const struct wl_agent_event *e)
+{
+    if (a->cfg->event != NULL)
+        a->cfg->event(a->cfg->event_ctx, e);
+}
+
+/* Session transitions, and the end of a piece of work. */
+static void emit_at(struct agent *a, uint8_t type, uint16_t ch, uint32_t code)
+{
+    struct wl_agent_event e;
+
+    memset(&e, 0, sizeof(e));
+    e.type = type;
+    e.ch = ch;
+    e.code = code;
+    emit(a, &e);
+}
+
+static void emit_work(struct agent *a, uint16_t ch, uint8_t kind, const char *what,
+                      uint64_t total)
+{
+    struct wl_agent_event e;
+
+    memset(&e, 0, sizeof(e));
+    e.type = WL_EV_CHANNEL;
+    e.ch = ch;
+    e.kind = kind;
+    e.text = what;
+    e.total = total;
+    emit(a, &e);
+}
+
+static void emit_progress(struct agent *a, uint16_t ch, uint64_t done)
+{
+    struct wl_agent_event e;
+
+    memset(&e, 0, sizeof(e));
+    e.type = WL_EV_PROGRESS;
+    e.ch = ch;
+    e.done = done;
+    emit(a, &e);
+}
+
 struct sync;
-static void sync_end(struct sync *y);
+static void sync_end(struct agent *a, struct sync *y);
 
 static struct xfer *find_xfer(struct agent *a, uint16_t ch)
 {
@@ -158,8 +210,12 @@ static struct xfer *find_xfer(struct agent *a, uint16_t ch)
     return NULL;
 }
 
-static void end_xfer(struct xfer *x, int keep_temp)
+static void end_xfer(struct agent *a, struct xfer *x, int keep_temp)
 {
+    /* Only work that was announced is reported as finished; a transfer
+     * rejected before it went active never appeared anywhere. */
+    if (x->active)
+        emit_at(a, WL_EV_FINISHED, x->ch, 0);
     if (x->f != NULL)
         (void)fclose(x->f);
     if (!keep_temp && x->kind == WL_KIND_PUT && x->tmp[0] != '\0')
@@ -179,6 +235,8 @@ static struct exec *find_exec(struct agent *a, uint16_t ch)
 /* Ends a command without blocking: the process goes to the reaper. */
 static void end_exec(struct agent *a, struct exec *e)
 {
+    if (e->active)
+        emit_at(a, WL_EV_FINISHED, e->ch, e->code);
     if (e->proc != NULL) {
         struct reaping *r = malloc(sizeof(*r));
 
@@ -230,11 +288,12 @@ static void on_session(void *ctx)
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
         if (a->xfers[i].active)
-            end_xfer(&a->xfers[i], 0);
+            end_xfer(a, &a->xfers[i], 0);
     }
     if (a->sync.active)
-        sync_end(&a->sync);
+        sync_end(a, &a->sync);
     log_line(a, "session: new client", "");
+    emit_at(a, WL_EV_SESSION, 0, 0);
 }
 
 static void on_ready(void *ctx, const struct wl_hello *h)
@@ -242,6 +301,14 @@ static void on_ready(void *ctx, const struct wl_hello *h)
     struct agent *a = ctx;
 
     log_line(a, "session: client ", h->build);
+    {
+        struct wl_agent_event e;
+
+        memset(&e, 0, sizeof(e));
+        e.type = WL_EV_READY;
+        e.text = h->build;
+        emit(a, &e);
+    }
 }
 
 /*
@@ -660,6 +727,7 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
         e->active = 1;
         e->ch = ch;
         log_line(a, "exec: ", cmd_z);
+        emit_work(a, ch, WL_KIND_EXEC, cmd_z, 0);
     }
     free(cmd_z);
     free(cwd_z);
@@ -734,11 +802,12 @@ static void open_put(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
     x->size = size;
     x->mtime = mtime;
     if (wl_peer_accept(a->peer, ch) != WL_OK) {
-        end_xfer(x, 0);
+        end_xfer(a, x, 0);
         return;
     }
     x->active = 1;
     log_line(a, "put: ", x->path);
+    emit_work(a, ch, WL_KIND_PUT, x->path, x->size);
 }
 
 static void open_get(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
@@ -776,25 +845,28 @@ static void open_get(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
         return;
     }
     if (wl_peer_accept(a->peer, ch) != WL_OK) {
-        end_xfer(x, 0);
+        end_xfer(a, x, 0);
         return;
     }
     wl_put_u64le(meta, x->size);
     wl_put_u64le(meta + 8, x->mtime);
     x->active = 1;
     if (wl_peer_send(a->peer, ch, WL_FILE_META, meta, sizeof(meta)) != WL_OK) {
-        end_xfer(x, 0);
+        end_xfer(a, x, 0);
         return;
     }
     log_line(a, "get: ", x->path);
+    emit_work(a, ch, WL_KIND_GET, x->path, x->size);
 }
 
 /* ---------------------------------------------------------------------------
  * sync
  * ------------------------------------------------------------------------- */
 
-static void sync_end(struct sync *y)
+static void sync_end(struct agent *a, struct sync *y)
 {
+    if (y->active)
+        emit_at(a, WL_EV_FINISHED, y->ch, 0);
     if (y->hash_f != NULL)
         (void)fclose(y->hash_f);
     if (y->f != NULL)
@@ -1244,6 +1316,7 @@ static void open_sync(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     y->active = 1;
     y->ch = ch;
     log_line(a, "sync: ", y->root);
+    emit_work(a, ch, WL_KIND_SYNC, y->root, 0);
 }
 
 static void on_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args, size_t n)
@@ -1392,11 +1465,11 @@ static void on_closed(void *ctx, uint16_t ch)
     }
     if (x != NULL) {
         (void)wl_peer_close(a->peer, ch);
-        end_xfer(x, 0);
+        end_xfer(a, x, 0);
     }
     if (a->sync.active && a->sync.ch == ch) {
         (void)wl_peer_close(a->peer, ch);
-        sync_end(&a->sync);
+        sync_end(a, &a->sync);
     }
 }
 
@@ -1490,6 +1563,7 @@ static void service_exec(struct agent *a, struct exec *e)
 
                 memmove(e->pend[s], e->pend[s] + n, e->pend_len[s] - n);
                 e->pend_len[s] -= n;
+                e->out_total += n;
                 if (e->pend_len[s] > 0)
                     break; /* mux queue full; the process waits */
             }
@@ -1501,6 +1575,10 @@ static void service_exec(struct agent *a, struct exec *e)
         }
     }
 
+    if (e->out_total != e->reported) {
+        e->reported = e->out_total;
+        emit_progress(a, e->ch, e->out_total);
+    }
     if (!e->exited)
         e->exited = e->proc != NULL ? wl_proc_exited(e->proc, &e->code) : 1;
     /* EXIT only after both streams are drained, so the client sees every
@@ -1523,6 +1601,14 @@ static void service_exec(struct agent *a, struct exec *e)
 /* Streams a GET out, and closes either kind of transfer once it is over. */
 static void service_xfer(struct agent *a, struct xfer *x)
 {
+    /* Both directions land in x->done, so one place reports either kind.
+     * A sync has no byte count of its own to report: its channel carries a
+     * manifest as well as file contents, and the files it writes are counted
+     * in its own summary. */
+    if (x->done != x->reported) {
+        x->reported = x->done;
+        emit_progress(a, x->ch, x->done);
+    }
     if (x->kind == WL_KIND_GET && !x->finished && !x->failed) {
         while (!x->at_eof || x->buf_len > 0) {
             if (x->buf_len > 0) {
@@ -1555,7 +1641,7 @@ static void service_xfer(struct agent *a, struct xfer *x)
         }
     }
     if (x->finished && wl_peer_close(a->peer, x->ch) == WL_OK)
-        end_xfer(x, 1);
+        end_xfer(a, x, 1);
 }
 
 wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
@@ -1598,6 +1684,18 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
         }
         if (st != WL_OK)
             break;
+        /*
+         * A client that goes away is noticed by the link rather than by a
+         * handler, so the departure is a transition to watch for here. Without
+         * it a display would show the last client as attached forever.
+         */
+        if (wl_peer_ready(a->peer) != a->was_ready) {
+            a->was_ready = !a->was_ready;
+            if (!a->was_ready) {
+                log_line(a, "session: the client is gone", "");
+                emit_at(a, WL_EV_GONE, 0, 0);
+            }
+        }
         for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
             if (a->execs[i].active)
                 service_exec(a, &a->execs[i]);
@@ -1626,10 +1724,10 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
         if (a->xfers[i].active)
-            end_xfer(&a->xfers[i], 0);
+            end_xfer(a, &a->xfers[i], 0);
     }
     if (a->sync.active)
-        sync_end(&a->sync);
+        sync_end(a, &a->sync);
     /* Shutting down is the one place that waits for a child at all, and even
      * there the wait is bounded: a child that will not go is abandoned rather
      * than forced, so the agent always reaches its exit and its launcher can

@@ -44,14 +44,16 @@ without errors. `make tidy` says so when it skips the Win32 half for want of
 those headers.
 
 ```sh
-make            # Linux client -> build/bin/devlink
-make agent      # Win98 agent  -> build/bin/DEVLINK.EXE
-make dist       # agent + launcher + README, staged for the target
+make            # Linux client  -> build/bin/devlink
+make agent      # Windows agent -> build/bin/DEVLINK.EXE (console)
+                #                  build/bin/DEVLINKW.EXE (window)
+make dist       # agents + launcher + README, staged for the target
                 # (make dist DEST=/run/media/you/STICK writes it to a stick)
 make test       # cmocka suite
 make coverage   # line coverage, gated at 80%
 make analyze    # cppcheck, gcc -fanalyzer, stack usage
 make tidy       # clang-tidy, including the Win32 agent sources
+make gui-preview  # photograph the windowed agent under Wine (no gate)
 make help       # everything else
 ```
 

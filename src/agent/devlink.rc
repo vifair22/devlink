@@ -1,0 +1,41 @@
+/*
+ * Resources for both agent binaries.
+ *
+ * The icon is drawn by tools/make_icon.py at build time rather than kept in
+ * the repository, so there is no binary here that a diff cannot show. The
+ * windowed agent uses it for its window, its taskbar entry and its tray
+ * icon, and the console one carries it so the file looks like itself in
+ * Explorer.
+ *
+ * The version block is worth the few lines: at the target, with no client
+ * to ask, right-clicking the file and reading Properties is the only way to
+ * tell which build is sitting there.
+ */
+
+1 ICON "devlink.ico"
+
+1 VERSIONINFO
+FILEVERSION DEVLINK_VER_COMMA
+PRODUCTVERSION DEVLINK_VER_COMMA
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+{
+    BLOCK "StringFileInfo"
+    {
+        BLOCK "040904E4"
+        {
+            VALUE "FileDescription", "devlink agent\0"
+            VALUE "FileVersion", DEVLINK_VER_TEXT "\0"
+            VALUE "InternalName", "devlink\0"
+            VALUE "ProductName", "devlink\0"
+            VALUE "ProductVersion", DEVLINK_VER_TEXT "\0"
+        }
+    }
+    BLOCK "VarFileInfo"
+    {
+        VALUE "Translation", 0x409, 1252
+    }
+}

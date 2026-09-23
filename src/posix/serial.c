@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -136,21 +137,112 @@ static int baud_to_speed(uint32_t baud, speed_t *out)
     return 0;
 }
 
+/* The name a pid goes by, or an empty string. */
+static void name_of(long pid, char *out, size_t cap)
+{
+    char path[64];
+    FILE *f;
+
+    out[0] = '\0';
+    (void)snprintf(path, sizeof(path), "/proc/%ld/comm", pid);
+    f = fopen(path, "r");
+    if (f == NULL)
+        return;
+    if (fgets(out, (int)cap, f) != NULL) {
+        size_t n = strlen(out);
+
+        while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+            out[--n] = '\0';
+    }
+    (void)fclose(f);
+}
+
 /*
- * Names whoever else has the port open, for the message. Best effort: it walks
- * /proc looking for a descriptor on the same character device, and says nothing
- * if it cannot tell. Comparing device numbers rather than paths is what makes
- * it work through /dev/serial/by-id symlinks.
+ * The pid actually holding a flock on this file, or 0.
+ *
+ * This is the question worth asking, and it is not the same as who has the
+ * device open. A port can be open in several processes while exactly one of
+ * them holds the lock, and naming any of the others sends the reader after
+ * something that is not in their way: the case that prompted this named socat,
+ * which was passing the bytes through, rather than the multiplexer that had
+ * the lock. /proc/locks answers it outright.
+ *
+ * Its lines read "9: FLOCK ADVISORY WRITE 336893 00:1b:7 0 EOF": the pid, then
+ * the filesystem's device as hex major:minor and the inode in decimal. That is
+ * st_dev and st_ino, not the st_rdev the fallback below compares.
+ */
+static long lock_holder(const struct stat *want)
+{
+    FILE *f = fopen("/proc/locks", "r");
+    char line[256];
+    long pid = 0;
+
+    if (f == NULL)
+        return 0;
+    while (pid == 0 && fgets(line, sizeof(line), f) != NULL) {
+        char *field[6];
+        char *save = NULL;
+        char *tok = strtok_r(line, " \t\n", &save);
+        unsigned n = 0;
+        char *at;
+        long maj;
+        long min;
+        long ino;
+        long who;
+
+        while (tok != NULL && n < 6) {
+            field[n++] = tok;
+            tok = strtok_r(NULL, " \t\n", &save);
+        }
+        if (n < 6 || strcmp(field[1], "FLOCK") != 0)
+            continue;
+        who = strtol(field[4], &at, 10);
+        if (at == field[4] || who <= 0)
+            continue;
+        maj = strtol(field[5], &at, 16);
+        if (*at != ':')
+            continue;
+        min = strtol(at + 1, &at, 16);
+        if (*at != ':')
+            continue;
+        ino = strtol(at + 1, &at, 10);
+        if (*at != '\0')
+            continue;
+        if ((unsigned long)ino == (unsigned long)want->st_ino
+            && makedev((unsigned)maj, (unsigned)min) == want->st_dev)
+            pid = who;
+    }
+    (void)fclose(f);
+    return pid;
+}
+
+/*
+ * Names whoever is holding the port, for the message. Best effort, and it says
+ * nothing rather than guessing. The lock holder is asked for first, since that
+ * is the process in the way; failing that it walks /proc for a descriptor on
+ * the same character device, which still finds an opener that took the port
+ * without locking it. Comparing device numbers rather than paths is what makes
+ * that work through /dev/serial/by-id symlinks.
  */
 static void name_the_holder(const char *path, char *out, size_t cap)
 {
     struct stat want;
     DIR *proc;
     struct dirent *e;
+    long owner;
 
     out[0] = '\0';
     if (stat(path, &want) != 0 || !S_ISCHR(want.st_mode))
         return;
+    owner = lock_holder(&want);
+    if (owner > 0) {
+        char comm[64];
+
+        name_of(owner, comm, sizeof(comm));
+        (void)snprintf(out, cap, " (held by pid %ld%s%s)", owner,
+                       comm[0] != '\0' ? ", " : "", comm);
+        return;
+    }
     proc = opendir("/proc");
     if (proc == NULL)
         return;

@@ -18,6 +18,7 @@ is only needed once there is an agent feature to try.
 | 9 | TCP transport | same features over the new NIC |
 | 10 | Windows 2000 pass | full suite against a 2000 agent, and the NT-only improvements below |
 | 11 | Local multiplexer | several commands at once from separate terminals, over one session |
+| 12 | A window instead of a console | the agent runs as a real Win32 window on the A21m, showing what it is doing now |
 
 ## Iteration 11: running more than one command at a time
 
@@ -50,6 +51,106 @@ The foundation is proved before anything is built on it:
 quick one while it runs, and requires the quick one to finish first with each
 channel's output whole and separate. It was checked against an agent given a
 single exec slot, where it fails.
+
+## Iteration 12: a window instead of a console
+
+Decided 2026-09-23. The agent is already a Win32 console PE; this makes it a
+Win32 *window*. The reason is not cosmetic. Since iteration 11 the agent can
+have eight commands, four transfers and a sync live at the same time, and a
+scrolling log fundamentally cannot show what is happening **now**, only what
+happened. A window can hold a list of live channels next to the log, which is
+the one view the console can never render.
+
+The seams for it were already there, put in for the console:
+`wl_agent_cfg.stop` is polled once per loop iteration and `wl_agent_cfg.log`
+is called for everything worth printing. So `wl_agent_serve` runs unchanged on
+a worker thread, the GUI thread runs an ordinary message pump and never blocks
+on the port, and Stop stays cooperative, bounded by one 20 ms pump, with no
+TerminateThread anywhere near it.
+
+Two binaries, from one set of objects. `DEVLINK.EXE` stays exactly as it is:
+the console agent, the diagnostics (`echo`, `linktest`), and the unmaintained
+9x path. `DEVLINKW.EXE` is the window, linked `-l=nt_win`. The reason is
+Windows 2000, not taste: `AttachConsole` is XP and later, so a GUI-subsystem
+binary on 2000 cannot write to the console that launched it, and a single GUI
+binary would silently lose the output of every diagnostic. Same split as
+vim/gvim.
+
+The window itself has to stay dumb, because nothing in it can be reached from
+cmocka on Linux: it creates controls, lays them out on WM_SIZE, and routes
+messages. Everything with logic goes below it into `wl_monitor`, a fixed-size
+model in the core with the log ring and the live-channel rows, fed by a new
+`wl_agent_cfg.event` callback carrying the structured facts (session up, client
+identified, channel opened, progress, closed) that `log` currently flattens
+into prose. That callback is tested the way the rest of the agent is: the real
+loop in a thread over a pty, running real commands, asserting a row appears
+while a command runs and is gone after it ends. The GUI owns a CRITICAL_SECTION
+around the producer callback and renders on a 250 ms timer, which coalesces
+bursts and keeps a 500 MHz P3 from repainting a ListView per event.
+
+One trap, found by reading rather than by running it: `wl_proc_start` passes
+`dwCreationFlags = 0`, so children inherit the agent's console. A
+GUI-subsystem process has none, and Windows would then allocate a fresh
+console per command, flashing a black box on the target every time anything
+runs. The GUI build needs `CREATE_NO_WINDOW` on NT, or a hidden
+`STARTUPINFO` on 9x.
+
+Order of work: the model and the event callback first, tested and with nothing
+Windows-specific in it; then the window, the worker thread and the layout;
+then the parts that make it an agent rather than an app, which is the tray
+icon, starting minimised, and replacing the batch file in Startup; then the
+manual, the `dist` layout and a deployment once it is cleared.
+
+**Done so far.** `wl_monitor` and the `event` callback, with eleven tests: ten
+on the model and one that runs the real agent loop over a pty and requires a
+command to be listed while it runs and gone after it ends, checked against an
+agent with each half of the reporting removed. Then `DEVLINKW.EXE` itself: a
+worker thread, a virtual list answered from the model as it paints, a log pane
+appended to rather than rebuilt, and a status bar. `wl_proc_start` now passes
+`CREATE_NO_WINDOW` with a hidden `STARTUPINFO`, which was the trap named above.
+
+**Looking at it without the target.** `make gui-preview` runs the window under
+Wine on a headless X server and converts the framebuffer to a PNG
+(`tools/gui-preview.sh`, `tools/xwd2png.py`). It is in no gate and skips itself
+where Wine or Xvfb is missing. What it proves is that the window comes up and
+the layout holds, against Wine's common controls rather than Windows 2000's.
+Driving it from the real client over a socat pty pair, which the same rig
+allows, is what showed the list working with a command and a transfer running
+together, and turned up two defects elsewhere (see below).
+
+**Then the rest of the window.** An icon, drawn by `tools/make_icon.py` at
+build time and bound into both binaries with a version block, so the file says
+which build it is when there is no client to ask. A tray entry with Open,
+Start, Stop and Exit, declared at the size shell32 4.0 used because asking for
+a larger structure than the shell understands fails outright. Minimising goes
+there and off the taskbar; `-tray` starts it there, which is what a Startup
+shortcut wants. A File and Help menu, and Copy line, Copy all and Clear on the
+log, because the message worth having is usually an error and the alternative
+is reading it off the target's screen.
+
+**Still to do.** Self-replacement for the windowed agent, which cannot use
+AGENT.BAT's trick of a loop around a console program without keeping a console
+on the desktop; the Startup shortcut on the target; and a deployment, which is
+the user's to clear.
+
+### Two defects found while looking at the window
+
+Neither is in the window. Both were in the way of running it here, which is how
+they turned up.
+
+- **The busy message named the wrong process.** `name_the_holder` walked /proc
+  for anything with the port open and reported the first match, which is not
+  necessarily the one holding the lock: here it named socat, which was passing
+  the bytes through, while the multiplexer held the flock. Sending somebody
+  after the wrong pid is worse than naming nobody, since they may kill it. It
+  now reads `/proc/locks`, which answers the question outright, and falls back
+  to the scan for an opener that took the port without locking it.
+- **The multiplexer ran as `exe`.** It starts by `execv("/proc/self/exe")`,
+  which is deliberate: it guarantees the daemon is this exact binary rather
+  than whatever now sits at that path. The kernel takes the process name from
+  the file executed, though, so the daemon appeared as `exe` and neither `ps`
+  nor `pkill devlink` found it. A `prctl(PR_SET_NAME)` restores the name
+  without giving up execing the running image.
 
 ## Targets
 
@@ -118,10 +219,9 @@ what matters is API discipline in `src/win32/`:
 - The handshake reports the platform (GetVersionEx dwPlatformId) so the
   client can adapt, e.g. cmd.exe vs command.com for `exec`.
 
-Names in this repo still say 98: the project directory, `make agent`,
-`DEVLINK.EXE`, `include/devlink/`. They all change in one mechanical commit
-when the project gets its real name, which has not been chosen yet; renaming
-twice would be worse than carrying a wrong name for a while.
+The rename to devlink landed in `d62528e`, so the names in the repo are the
+real ones. One is left: the working directory on the development machine is
+still `w98link`, which is cosmetic and costs a `git remote` check to change.
 
 Bootstrapping: the first agent binary reaches the A21m over the existing
 Kermit link. From iteration 7 on, the agent can replace itself. After the

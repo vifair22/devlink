@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1123,6 +1124,16 @@ static int cmd_mux(int argc, char **argv)
         printf("stopping the multiplexer (pid %ld)\n", pid);
         return 0;
     }
+
+    /*
+     * An autostarted multiplexer arrives here through execv("/proc/self/exe"),
+     * which is what guarantees it is this exact binary rather than whatever now
+     * sits at the same path. The cost is the name: the kernel takes it from the
+     * file that was executed, so the daemon runs as "exe" and neither ps nor
+     * pkill finds it under the name it was started by. Saying so restores that,
+     * without giving up execing the running image.
+     */
+    (void)prctl(PR_SET_NAME, "devlink", 0, 0, 0);
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.session = serial_session(baud);
