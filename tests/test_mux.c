@@ -34,6 +34,11 @@ static struct {
     struct wl_mux_cfg mux_cfg;
     char sock[128];
     volatile int stop;
+    /* Holds the agent back so the line is genuinely not up when a client
+     * arrives. On a real 115200 line the handshake takes tens of milliseconds
+     * and a client wins that race easily; over a pty it takes almost none, so
+     * the race has to be made rather than hoped for. */
+    volatile int agent_delay_ms;
     pthread_t agent_th;
     pthread_t mux_th;
     wl_status agent_result;
@@ -49,6 +54,8 @@ static int should_stop(void *ctx)
 static void *agent_main(void *arg)
 {
     (void)arg;
+    if (h.agent_delay_ms > 0)
+        (void)poll(NULL, 0, h.agent_delay_ms);
     h.agent_result = wl_agent_serve(&h.agent_t, &h.agent_cfg, 0x51A7EU);
     return NULL;
 }
@@ -69,10 +76,10 @@ static struct wl_session_cfg fast_session(void)
     return cfg;
 }
 
-static int setup(void **state)
+static int setup_common(int agent_delay_ms)
 {
-    (void)state;
     memset(&h, 0, sizeof(h));
+    h.agent_delay_ms = agent_delay_ms;
     pty_pair(&h.agent_t, &h.line_t);
     (void)snprintf(h.sock, sizeof(h.sock), "/tmp/w98link-test-%ld.sock", (long)getpid());
     (void)remove(h.sock);
@@ -86,6 +93,19 @@ static int setup(void **state)
     assert_int_equal(pthread_create(&h.agent_th, NULL, agent_main, NULL), 0);
     assert_int_equal(pthread_create(&h.mux_th, NULL, mux_main, NULL), 0);
     return 0;
+}
+
+static int setup(void **state)
+{
+    (void)state;
+    return setup_common(0);
+}
+
+/* The multiplexer is listening well before the agent answers. */
+static int setup_late_agent(void **state)
+{
+    (void)state;
+    return setup_common(400);
 }
 
 static int teardown(void **state)
@@ -263,6 +283,40 @@ static void test_one_client_leaving_does_not_disturb_the_other(void **state)
     assert_memory_equal(slow.cap.out, "S1\nS2\nS3\n", 9);
 }
 
+/*
+ * The race a real user hit: a command that starts the multiplexer connects at
+ * once, before the line's session has been established, and used to be told
+ * "the line is not up". No waiting here on purpose, so a regression puts it
+ * straight back.
+ */
+static void test_a_client_arriving_before_the_line_is_up_is_served(void **state)
+{
+    struct wl_session_cfg cfg = local_session();
+    struct wl_transport t;
+    struct wl_exec_result r;
+    struct capture cap;
+    struct wl_exec_io io = {&cap, on_output, NULL};
+    uint32_t start = wl_clock_ms();
+
+    (void)state;
+    memset(&cap, 0, sizeof(cap));
+    /* Only the socket is waited for, which is all the client can see, and is
+     * exactly what the autostart waits for. The agent is 400 ms behind. */
+    while (wl_clock_since(start) < 5000U) {
+        if (wl_unix_connect(h.sock, &t) == WL_OK)
+            break;
+        (void)poll(NULL, 0, 5);
+    }
+    assert_true(wl_clock_since(start) < 5000U);
+    assert_int_equal(wl_client_exec(&t, &cfg, 909, "echo early", NULL, 0, &io, 5000, &r),
+                     WL_OK);
+    wl_transport_close(&t);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.len, 6);
+    assert_memory_equal(cap.out, "early\n", 6);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -272,6 +326,8 @@ int main(void)
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_one_client_leaving_does_not_disturb_the_other,
                                         setup, teardown),
+        cmocka_unit_test_setup_teardown(test_a_client_arriving_before_the_line_is_up_is_served,
+                                        setup_late_agent, teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

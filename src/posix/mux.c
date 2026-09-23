@@ -33,9 +33,26 @@ struct pair {
     uint16_t up;
     int up_open;  /* the agent accepted it */
     int pending;  /* opened upstream, answer not seen yet */
+    /*
+     * Opened by the client while the line was down, so it is held here until
+     * the session comes back rather than refused. Refusing was wrong twice
+     * over: a client that connects the instant the multiplexer starts has done
+     * nothing wrong, and neither has one whose line happens to be
+     * resynchronising at that moment.
+     */
+    int waiting;
+    uint8_t kind;
+    uint8_t *args;
+    size_t args_len;
+    uint32_t waiting_since;
     struct stash to_up;
     struct stash to_down;
 };
+
+/* How long a held open waits for the line before the client is told. The
+ * client has no timeout of its own once its handshake is done, so this is what
+ * stops it waiting for ever. */
+#define WAIT_FOR_LINE_MS 15000U
 
 struct client {
     int used;
@@ -92,6 +109,7 @@ static struct pair *pair_by_up(struct mux *m, uint16_t ch)
 
 static void pair_free(struct pair *p)
 {
+    free(p->args);
     memset(p, 0, sizeof(*p));
 }
 
@@ -221,10 +239,6 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
     struct mux *m = c->m;
     struct pair *p = NULL;
 
-    if (!m->up_ready) {
-        (void)wl_peer_reject(c->peer, ch, WL_E_UNKNOWN, "the line is not up");
-        return;
-    }
     for (unsigned i = 0; i < MUX_PAIRS && p == NULL; i++) {
         if (!m->pairs[i].used)
             p = &m->pairs[i];
@@ -237,12 +251,55 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
     p->used = 1;
     p->client = c->index;
     p->local = ch;
+    if (!m->up_ready) {
+        p->args = malloc(n > 0 ? n : 1);
+        if (p->args == NULL) {
+            (void)wl_peer_reject(c->peer, ch, WL_E_PROCESS, "agent out of memory");
+            pair_free(p);
+            return;
+        }
+        memcpy(p->args, args, n);
+        p->args_len = n;
+        p->kind = kind;
+        p->waiting = 1;
+        p->waiting_since = wl_clock_ms();
+        return;
+    }
     if (wl_peer_open(m->up, kind, args, n, &p->up) != WL_OK) {
         (void)wl_peer_reject(c->peer, ch, WL_E_PROCESS, wl_error());
         pair_free(p);
         return;
     }
     p->pending = 1;
+}
+
+/* Opens what was held while the line was down, and gives up on anything that
+ * has waited too long. */
+static void open_the_waiting(struct mux *m)
+{
+    for (unsigned i = 0; i < MUX_PAIRS; i++) {
+        struct pair *p = &m->pairs[i];
+
+        if (!p->used || !p->waiting)
+            continue;
+        if (!m->clients[p->client].used) {
+            pair_free(p);
+            continue;
+        }
+        if (m->up_ready) {
+            if (wl_peer_open(m->up, p->kind, p->args, p->args_len, &p->up) != WL_OK)
+                continue; /* the mux is full for the moment; try again */
+            p->waiting = 0;
+            p->pending = 1;
+            free(p->args);
+            p->args = NULL;
+            p->args_len = 0;
+        } else if (wl_clock_since(p->waiting_since) >= WAIT_FOR_LINE_MS) {
+            (void)wl_peer_reject(m->clients[p->client].peer, p->local, WL_E_UNKNOWN,
+                                 "the line did not come up");
+            pair_free(p);
+        }
+    }
 }
 
 static void down_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *data, size_t n)
@@ -473,8 +530,17 @@ wl_status wl_mux_serve(struct wl_transport *line, const struct wl_mux_cfg *cfg, 
         if (clients > 0)
             m->alone_since = wl_clock_ms();
         (void)poll(fds, nfds, (int)LOOP_MS);
-        if (fds[0].revents != 0)
+        /*
+         * Connections are left in the listen backlog until the line is up.
+         * Accepting sooner would hand the client a HELLO with no agent
+         * identity in it, because the agent's own HELLO has not arrived yet:
+         * the client would be told it was talking to platform 0 with no build.
+         * Waiting costs the client nothing, since its connect is already
+         * complete and it is simply not served for a few milliseconds.
+         */
+        if (fds[0].revents != 0 && m->up_ready)
             accept_client(m, listen_fd);
+        open_the_waiting(m);
 
         /* Pumped with no wait: the poll above is the only place this sleeps. A
          * peer whose records cannot be handed on is left alone, which stops its
