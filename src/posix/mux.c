@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -691,15 +692,35 @@ static int flush_stashes(struct mux *m, int *block_up, int *block_down)
     return waiting;
 }
 
+/*
+ * The socket that stands for this line.
+ *
+ * Taken from the device the path resolves to rather than the path as it was
+ * typed, because one cable has several names: /dev/ttyUSB0 and the
+ * /dev/serial/by-id link pointing at it are the same port. Naming the socket
+ * after each gave two sockets, so a client using the other name started a
+ * second multiplexer, which could not then open the port the first one held.
+ * It failed safely and said who had it, but the answer was to stop and use
+ * the other name, which is not something anyone should have to know.
+ *
+ * A path that will not resolve is used as given: the multiplexer can be
+ * started before the cable is plugged in, and refusing to name a socket for it
+ * would be worse than naming one that a later resolve agrees with anyway.
+ */
 int wl_mux_socket_path(const char *line, char *out, size_t cap)
 {
     const char *dir = getenv("XDG_RUNTIME_DIR");
-    const char *base = strrchr(line, '/');
+    char resolved[PATH_MAX];
+    const char *use = line;
+    const char *base;
     int n;
 
     if (dir == NULL || dir[0] == '\0')
         dir = "/tmp";
-    base = base != NULL ? base + 1 : line;
+    if (realpath(line, resolved) != NULL)
+        use = resolved;
+    base = strrchr(use, '/');
+    base = base != NULL ? base + 1 : use;
     n = snprintf(out, cap, "%s/devlink-%s.sock", dir, base);
     return n > 0 && (size_t)n < cap;
 }

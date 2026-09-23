@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -472,9 +473,55 @@ static void test_a_large_compressible_transfer_loses_nothing(void **state)
     assert_identical(local, back);
 }
 
+/*
+ * One cable has more than one name: /dev/ttyUSB0, and the /dev/serial/by-id
+ * link that points at it. Taking the socket name from the path as typed gave
+ * two sockets for one port, so pointing a second client at the other name
+ * started a second multiplexer, which then could not open the port the first
+ * one was holding.
+ */
+static void test_two_names_for_one_line_share_a_socket(void **state)
+{
+    char target[128];
+    char alias[128];
+    char from_target[256];
+    char from_alias[256];
+    int fd;
+
+    (void)state;
+    (void)snprintf(target, sizeof(target), "/tmp/devlink-line-%ld", (long)getpid());
+    (void)snprintf(alias, sizeof(alias), "/tmp/devlink-alias-%ld", (long)getpid());
+    (void)remove(target);
+    (void)remove(alias);
+    fd = open(target, O_CREAT | O_WRONLY, 0600);
+    assert_true(fd >= 0);
+    (void)close(fd);
+    assert_int_equal(symlink(target, alias), 0);
+
+    assert_int_equal(wl_mux_socket_path(target, from_target, sizeof(from_target)), 1);
+    assert_int_equal(wl_mux_socket_path(alias, from_alias, sizeof(from_alias)), 1);
+    assert_string_equal(from_target, from_alias);
+
+    (void)remove(target);
+    (void)remove(alias);
+}
+
+/* A line that is not plugged in yet cannot be resolved, and still has to name
+ * a socket: the multiplexer may be started before the cable is in. */
+static void test_a_line_that_is_not_there_still_names_a_socket(void **state)
+{
+    char out[256];
+
+    (void)state;
+    assert_int_equal(wl_mux_socket_path("/dev/ttyUSB9", out, sizeof(out)), 1);
+    assert_non_null(strstr(out, "devlink-ttyUSB9.sock"));
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
+        cmocka_unit_test(test_two_names_for_one_line_share_a_socket),
+        cmocka_unit_test(test_a_line_that_is_not_there_still_names_a_socket),
         cmocka_unit_test_setup_teardown(test_a_client_reaches_the_agent_through_the_multiplexer,
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_two_clients_run_at_once_without_disturbing_each_other,
