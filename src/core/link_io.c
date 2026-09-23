@@ -1,5 +1,5 @@
-#include "w98link/clock.h"
-#include "w98link/link_io.h"
+#include "devlink/clock.h"
+#include "devlink/link_io.h"
 
 static wl_status flush_tx(struct wl_link *l, struct wl_transport *t)
 {

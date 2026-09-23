@@ -1,10 +1,10 @@
-#ifndef W98LINK_CLOCK_H
-#define W98LINK_CLOCK_H
+#ifndef DEVLINK_CLOCK_H
+#define DEVLINK_CLOCK_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/status.h"
+#include "devlink/status.h"
 
 /*
  * Monotonic milliseconds from an arbitrary origin, implemented per platform.

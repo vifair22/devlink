@@ -3,7 +3,7 @@
 #include <string.h>
 #include <windows.h>
 
-#include "w98link/transport.h"
+#include "devlink/transport.h"
 
 /*
  * Win32 serial transport, synchronous I/O. Overlapped I/O on comm handles

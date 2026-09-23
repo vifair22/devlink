@@ -9,8 +9,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "w98link/clock.h"
-#include "w98link/proc.h"
+#include "devlink/clock.h"
+#include "devlink/proc.h"
 
 /* How long shutdown waits for the child to go before giving up on it. */
 #define FREE_WAIT_MS 2000U

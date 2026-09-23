@@ -1,5 +1,5 @@
-#ifndef W98LINK_STATUS_H
-#define W98LINK_STATUS_H
+#ifndef DEVLINK_STATUS_H
+#define DEVLINK_STATUS_H
 
 /*
  * Every fallible function returns a wl_status. The deepest function that

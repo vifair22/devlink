@@ -9,7 +9,7 @@
 
 #include <cmocka.h>
 
-#include "w98link/sha256.h"
+#include "devlink/sha256.h"
 
 static void check(const char *msg, size_t n, const char *hex)
 {
@@ -89,7 +89,7 @@ static void test_file_hash(void **state)
     FILE *f;
 
     (void)state;
-    (void)snprintf(path, sizeof(path), "/tmp/w98link-sha-%d", (int)getpid());
+    (void)snprintf(path, sizeof(path), "/tmp/devlink-sha-%d", (int)getpid());
     f = fopen(path, "wb");
     assert_non_null(f);
     assert_int_equal(fwrite("abc", 1, 3, f), 3);

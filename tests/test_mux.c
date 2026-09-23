@@ -12,12 +12,12 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/agent.h"
-#include "w98link/client_exec.h"
-#include "w98link/clock.h"
-#include "w98link/mux.h"
-#include "w98link/proto.h"
-#include "w98link/usock.h"
+#include "devlink/agent.h"
+#include "devlink/client_exec.h"
+#include "devlink/clock.h"
+#include "devlink/mux.h"
+#include "devlink/proto.h"
+#include "devlink/usock.h"
 
 /*
  * The local multiplexer, end to end: the real agent loop on one side of a pty,
@@ -81,7 +81,7 @@ static int setup_common(int agent_delay_ms)
     memset(&h, 0, sizeof(h));
     h.agent_delay_ms = agent_delay_ms;
     pty_pair(&h.agent_t, &h.line_t);
-    (void)snprintf(h.sock, sizeof(h.sock), "/tmp/w98link-test-%ld.sock", (long)getpid());
+    (void)snprintf(h.sock, sizeof(h.sock), "/tmp/devlink-test-%ld.sock", (long)getpid());
     (void)remove(h.sock);
 
     h.agent_cfg.session = fast_session();

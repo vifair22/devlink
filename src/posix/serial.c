@@ -10,8 +10,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "w98link/posix_fd.h"
-#include "w98link/transport.h"
+#include "devlink/posix_fd.h"
+#include "devlink/transport.h"
 
 struct fd_impl {
     int fd;

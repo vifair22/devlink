@@ -1,5 +1,5 @@
-#ifndef W98LINK_VERSION_H
-#define W98LINK_VERSION_H
+#ifndef DEVLINK_VERSION_H
+#define DEVLINK_VERSION_H
 
 /*
  * Full build version, SEMVER_YYYYMMDD.HHMM.TYPE. Both the Linux client and

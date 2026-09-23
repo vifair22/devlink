@@ -1,4 +1,4 @@
-#include "w98link/crc32.h"
+#include "devlink/crc32.h"
 
 /* Byte-at-a-time table lookup. At 115200 bps the link moves about 11 KB/s,
  * so slicing-by-8 would be speed nobody can observe; the table is built on

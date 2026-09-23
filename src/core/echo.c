@@ -1,8 +1,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "w98link/clock.h"
-#include "w98link/echo.h"
+#include "devlink/clock.h"
+#include "devlink/echo.h"
 
 /* Serial reads are small; a few hundred bytes per call keeps the loop
  * responsive without many syscalls per frame. */

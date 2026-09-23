@@ -3,8 +3,8 @@
 #include <string.h>
 #include <windows.h>
 
-#include "w98link/clock.h"
-#include "w98link/proc.h"
+#include "devlink/clock.h"
+#include "devlink/proc.h"
 
 /*
  * Win32 implementation.

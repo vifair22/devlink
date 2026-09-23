@@ -1,12 +1,12 @@
-#ifndef W98LINK_CLIENT_EXEC_H
-#define W98LINK_CLIENT_EXEC_H
+#ifndef DEVLINK_CLIENT_EXEC_H
+#define DEVLINK_CLIENT_EXEC_H
 
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/peer.h"
-#include "w98link/transport.h"
+#include "devlink/peer.h"
+#include "devlink/transport.h"
 
 /* Client side of EXEC: connects, runs one command on the agent, streams its
  * output to the caller, and returns its exit status. */

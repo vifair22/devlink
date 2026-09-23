@@ -1,7 +1,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include "w98link/status.h"
+#include "devlink/status.h"
 
 /* Watcom and MSVC spell thread-local storage their own way. __declspec(thread)
  * is safe here because it is only used in the EXE, never a DLL, which is the

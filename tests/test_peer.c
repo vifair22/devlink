@@ -8,9 +8,9 @@
 #include <cmocka.h>
 
 #include "sim_line.h"
-#include "w98link/bytes.h"
-#include "w98link/peer.h"
-#include "w98link/proto.h"
+#include "devlink/bytes.h"
+#include "devlink/peer.h"
+#include "devlink/proto.h"
 
 /* Two peers over the simulated serial line, in virtual time. */
 

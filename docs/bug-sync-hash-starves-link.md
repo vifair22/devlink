@@ -2,7 +2,7 @@
 
 Status: fixed 2026-09-22. Found 2026-09-22 against agent `0.1.0_20260922.1801.win98`,
 client `0.1.0_20260922.1623.release` (and the same source built as
-`w98link-debug`), Windows 98 SE on the A21m.
+`devlink-debug`), Windows 98 SE on the A21m.
 
 Found while using `sync --dry-run` to check a USB stick copy against the
 A21m's C: drive. Two defects surfaced together; they are filed as one
@@ -12,7 +12,7 @@ the same run, is in `bug-sync-connect-timeout.md`.
 ## What happened
 
 ```
-$ w98link sync --dry-run /run/media/vifair/G60SDFW/A21M/WIN98 C:/WIN98
+$ devlink sync --dry-run /run/media/vifair/G60SDFW/A21M/WIN98 C:/WIN98
 8 file(s) here, 0 already there, 0 to send
 dry run: nothing was changed
 $ echo $?
@@ -44,7 +44,7 @@ agent goes `DEAD_MS` (10 s, `src/core/link.c:12`) without servicing the link,
 the link is declared dead and the session restarts. The client sees a new
 session and fails the sync.
 
-Caught in gdb on the client (`build/bin/w98link-debug`, `break fail_msg`):
+Caught in gdb on the client (`build/bin/devlink-debug`, `break fail_msg`):
 
 ```
 fail_msg (..., msg="link reset during the sync", n=26) at src/core/sync.c:73
@@ -87,7 +87,7 @@ test harness) and asserts a non-zero exit would have caught it.
 1. Mount a FAT copy of a target directory on Linux with the default vfat
    options, so every mtime differs from the target's, and include one file
    of 60 MB or more.
-2. `w98link sync --dry-run <copy> <target dir>`: expect a bogus summary and
+2. `devlink sync --dry-run <copy> <target dir>`: expect a bogus summary and
    exit 0 (defects 1 and 2).
 
 ## Test once fixed

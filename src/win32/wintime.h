@@ -1,5 +1,5 @@
-#ifndef W98LINK_WIN32_WINTIME_H
-#define W98LINK_WIN32_WINTIME_H
+#ifndef DEVLINK_WIN32_WINTIME_H
+#define DEVLINK_WIN32_WINTIME_H
 
 #include <stdint.h>
 #include <windows.h>

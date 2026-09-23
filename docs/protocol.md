@@ -1,4 +1,4 @@
-# w98link protocol, version 1
+# devlink protocol, version 1
 
 Status: agreed in iteration 1. Implemented so far: everything except the TCP
 transport (iterations 2-8).
@@ -300,7 +300,7 @@ Unknown `@` commands are refused with OPEN_FAIL. v1 has two:
   same channel, then EXIT 0 and CLOSE. One entry per line:
 
   ```
-  f 135168 1790116008 W98AGENT.EXE
+  f 135168 1790116008 DEVLINK.EXE
   d 0 1790103092 SRC
   ```
 

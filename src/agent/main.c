@@ -3,25 +3,25 @@
 #include <string.h>
 #include <windows.h>
 
-#include "w98link/agent.h"
-#include "w98link/echo.h"
-#include "w98link/linktest.h"
-#include "w98link/proto.h"
-#include "w98link/transport.h"
-#include "w98link/version.h"
+#include "devlink/agent.h"
+#include "devlink/echo.h"
+#include "devlink/linktest.h"
+#include "devlink/proto.h"
+#include "devlink/transport.h"
+#include "devlink/version.h"
 
 static const char *const help =
-    "usage: W98AGENT --version\n"
-    "       W98AGENT serve [PORT] [BAUD]\n"
-    "       W98AGENT echo [PORT] [BAUD] [IDLE_SECONDS]\n"
-    "       W98AGENT linktest [PORT] [BAUD] [WAIT_SECONDS]\n"
+    "usage: DEVLINK --version\n"
+    "       DEVLINK serve [PORT] [BAUD]\n"
+    "       DEVLINK echo [PORT] [BAUD] [IDLE_SECONDS]\n"
+    "       DEVLINK linktest [PORT] [BAUD] [WAIT_SECONDS]\n"
     "\n"
-    "serve  the agent proper: serve w98link clients until stopped (Ctrl-C).\n"
+    "serve  the agent proper: serve devlink clients until stopped (Ctrl-C).\n"
     "       Defaults: COM1 115200.\n"
-    "echo   serve 'w98link echo' from Linux: echo every frame back.\n"
+    "echo   serve 'devlink echo' from Linux: echo every frame back.\n"
     "       Defaults: COM1 115200 60. Returns when the probe finishes or\n"
     "       after IDLE_SECONDS without a frame.\n"
-    "linktest  serve 'w98link linktest': echo the reliable stream back.\n"
+    "linktest  serve 'devlink linktest': echo the reliable stream back.\n"
     "       Defaults: COM1 115200 120. Returns 5 s after the stream stops.\n";
 
 static void print_platform(void)
@@ -73,15 +73,15 @@ static int cmd_serve(int argc, char **argv)
     cfg.platform = platform();
     cfg.log = console_log;
     if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
-        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;
     }
-    printf("w98agent %s serving on %s at %lu\n", wl_version(), port, baud);
+    printf("devlink agent %s serving on %s at %lu\n", wl_version(), port, baud);
     fflush(stdout);
     s = wl_agent_serve(&t, &cfg, (uint32_t)GetTickCount() ^ (uint32_t)GetCurrentProcessId());
     wl_transport_close(&t);
     if (s != WL_OK) {
-        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;
     }
     return 0;
@@ -101,7 +101,7 @@ static int cmd_echo(int argc, char **argv)
         return 1;
     }
     if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
-        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;
     }
     printf("echo: serving on %s at %lu, idle limit %lu s\n", port, baud, idle);
@@ -111,7 +111,7 @@ static int cmd_echo(int argc, char **argv)
            (unsigned)st.echoed, (unsigned)st.rx.frames, (unsigned)st.rx.crc,
            (unsigned)st.rx.malformed, (unsigned)st.rx.overflow);
     if (s != WL_OK) {
-        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;
     }
     return 0;
@@ -134,7 +134,7 @@ static int cmd_linktest(int argc, char **argv)
     wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = (uint32_t)(baud / 10UL);
     if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
-        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;
     }
     printf("linktest: serving on %s at %lu, waiting up to %lu s\n", port, baud, wait);
@@ -148,7 +148,7 @@ static int cmd_linktest(int argc, char **argv)
            (unsigned)r.stats.rx.frames, (unsigned)r.stats.rx.crc,
            (unsigned)r.stats.rx.malformed);
     if (s != WL_OK) {
-        fprintf(stderr, "W98AGENT: %s\n", wl_error());
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;
     }
     return 0;
@@ -167,7 +167,7 @@ int main(int argc, char **argv)
     (void)SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
 
     if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
-        printf("w98agent %s\n", wl_version());
+        printf("devlink agent %s\n", wl_version());
         print_platform();
         return 0;
     }

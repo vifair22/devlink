@@ -1,11 +1,11 @@
-#ifndef W98LINK_FRAME_H
-#define W98LINK_FRAME_H
+#ifndef DEVLINK_FRAME_H
+#define DEVLINK_FRAME_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/cobs.h"
-#include "w98link/status.h"
+#include "devlink/cobs.h"
+#include "devlink/status.h"
 
 /*
  * Serial link frames (docs/protocol.md, "Link layer: serial"). This module

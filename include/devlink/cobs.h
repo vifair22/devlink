@@ -1,10 +1,10 @@
-#ifndef W98LINK_COBS_H
-#define W98LINK_COBS_H
+#ifndef DEVLINK_COBS_H
+#define DEVLINK_COBS_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/status.h"
+#include "devlink/status.h"
 
 /*
  * Consistent Overhead Byte Stuffing. Encoding removes every zero byte, so a

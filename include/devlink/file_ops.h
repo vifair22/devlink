@@ -1,10 +1,10 @@
-#ifndef W98LINK_FILE_OPS_H
-#define W98LINK_FILE_OPS_H
+#ifndef DEVLINK_FILE_OPS_H
+#define DEVLINK_FILE_OPS_H
 
 #include <stdint.h>
 
-#include "w98link/peer.h"
-#include "w98link/transport.h"
+#include "devlink/peer.h"
+#include "devlink/transport.h"
 
 /*
  * Client side of PUT and GET. Both check a CRC-32 over the whole file and

@@ -1,7 +1,7 @@
-#ifndef W98LINK_USOCK_H
-#define W98LINK_USOCK_H
+#ifndef DEVLINK_USOCK_H
+#define DEVLINK_USOCK_H
 
-#include "w98link/transport.h"
+#include "devlink/transport.h"
 
 /*
  * Unix-domain sockets, for the local multiplexer: client invocations reach the

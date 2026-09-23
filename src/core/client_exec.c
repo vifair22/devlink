@@ -1,9 +1,9 @@
 #include <string.h>
 
-#include "w98link/client_exec.h"
-#include "w98link/clock.h"
-#include "w98link/proto.h"
-#include "w98link/wire.h"
+#include "devlink/client_exec.h"
+#include "devlink/clock.h"
+#include "devlink/proto.h"
+#include "devlink/wire.h"
 
 #define PUMP_MS 50U
 /* After EXIT, how long to keep pumping so our CLOSE and acks reach the

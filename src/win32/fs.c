@@ -2,8 +2,8 @@
 #include <string.h>
 #include <windows.h>
 
-#include "w98link/fs.h"
-#include "w98link/proto.h"
+#include "devlink/fs.h"
+#include "devlink/proto.h"
 #include "wintime.h"
 
 

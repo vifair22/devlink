@@ -1,5 +1,5 @@
-#ifndef W98LINK_SHA256_H
-#define W98LINK_SHA256_H
+#ifndef DEVLINK_SHA256_H
+#define DEVLINK_SHA256_H
 
 #include <stddef.h>
 #include <stdint.h>

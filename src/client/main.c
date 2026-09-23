@@ -9,17 +9,17 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "w98link/client_exec.h"
-#include "w98link/clock.h"
-#include "w98link/file_ops.h"
-#include "w98link/echo.h"
-#include "w98link/linktest.h"
-#include "w98link/mux.h"
-#include "w98link/usock.h"
-#include "w98link/proto.h"
-#include "w98link/sync.h"
-#include "w98link/transport.h"
-#include "w98link/version.h"
+#include "devlink/client_exec.h"
+#include "devlink/clock.h"
+#include "devlink/file_ops.h"
+#include "devlink/echo.h"
+#include "devlink/linktest.h"
+#include "devlink/mux.h"
+#include "devlink/usock.h"
+#include "devlink/proto.h"
+#include "devlink/sync.h"
+#include "devlink/transport.h"
+#include "devlink/version.h"
 
 #define DEFAULT_LINE "/dev/ttyUSB0"
 #define DEFAULT_BAUD 115200U
@@ -29,7 +29,7 @@
  * ------------------------------------------------------------------------- */
 
 static const char *const help_main =
-    "usage: w98link <command> [options]\n"
+    "usage: devlink <command> [options]\n"
     "\n"
     "commands:\n"
     "  exec      run a command on the agent and stream its output\n"
@@ -39,36 +39,36 @@ static const char *const help_main =
     "  info      show the agent's version and platform\n"
     "  time      compare the agent's clock with this one, or set it\n"
     "  mux       the multiplexer that lets several commands share the line\n"
-    "  echo      test the cable and ports against 'W98AGENT echo'\n"
-    "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
+    "  echo      test the cable and ports against 'DEVLINK echo'\n"
+    "  linktest  measure the reliable link against 'DEVLINK linktest'\n"
     "\n"
-    "  w98link --version\n"
-    "  w98link <command> --help\n";
+    "  devlink --version\n"
+    "  devlink <command> --help\n";
 
 static const char *const help_echo =
-    "usage: w98link echo [--line PATH] [--baud N] [--count N] [--size N]\n"
+    "usage: devlink echo [--line PATH] [--baud N] [--count N] [--size N]\n"
     "\n"
-    "Sends numbered frames and checks each echo from 'W98AGENT echo'.\n"
+    "Sends numbered frames and checks each echo from 'DEVLINK echo'.\n"
     "\n"
-    "  --line PATH   serial device (default " DEFAULT_LINE ", or $W98LINK_LINE)\n"
+    "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --count N     frames to send (default 20)\n"
     "  --size N      payload bytes per frame, up to 1024 (default 1024)\n";
 
 static const char *const help_exec =
-    "usage: w98link exec [--line PATH] [--baud N] [--cwd DIR] [--merge] [--] COMMAND...\n"
+    "usage: devlink exec [--line PATH] [--baud N] [--cwd DIR] [--merge] [--] COMMAND...\n"
     "\n"
     "Runs COMMAND on the agent through its shell (command.com on Win9x,\n"
     "cmd.exe on NT) and streams stdout and stderr back. Exits with the\n"
     "command's exit status, or 125 if it could not be run at all.\n"
     "\n"
-    "  --line PATH   serial device (default " DEFAULT_LINE ", or $W98LINK_LINE)\n"
+    "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --cwd DIR     directory to run in, on the agent (default: its own)\n"
     "  --merge       send stderr down stdout, preserving their interleaving\n";
 
 static const char *const help_sync =
-    "usage: w98link sync [--line PATH] [--baud N] [--delete] [--dry-run]\n"
+    "usage: devlink sync [--line PATH] [--baud N] [--delete] [--dry-run]\n"
     "                    [--hidden] LOCALDIR REMOTEDIR\n"
     "\n"
     "Makes REMOTEDIR on the agent match LOCALDIR, sending only files that\n"
@@ -79,14 +79,14 @@ static const char *const help_sync =
     "  --dry-run     report what would be sent, change nothing\n";
 
 static const char *const help_info =
-    "usage: w98link info [--line PATH] [--baud N]\n"
+    "usage: devlink info [--line PATH] [--baud N]\n"
     "\n"
     "Connects to the agent, prints what it reports about itself, and\n"
     "disconnects.\n";
 
 static const char *const help_mux =
-    "usage: w98link mux [--line PATH] [--baud N] [--idle SECONDS]\n"
-    "       w98link mux --stop [--line PATH]\n"
+    "usage: devlink mux [--line PATH] [--baud N] [--idle SECONDS]\n"
+    "       devlink mux --stop [--line PATH]\n"
     "\n"
     "Runs the multiplexer: one process owns the line and keeps a single\n"
     "session to the agent, and every other command reaches the agent through\n"
@@ -94,7 +94,7 @@ static const char *const help_mux =
     "what is already running, so it starts by itself when a command needs it\n"
     "and exits after --idle seconds (600 by default) with nobody connected.\n"
     "\n"
-    "Commands use it only when W98LINK_MUX=1 is set, and then start it by\n"
+    "Commands use it only when DEVLINK_MUX=1 is set, and then start it by\n"
     "themselves if it is not already running. It is off by default because\n"
     "starting it opens a session of its own, and the agent serves one session:\n"
     "on a line somebody is already using, that kills what they were running.\n"
@@ -104,7 +104,7 @@ static const char *const help_mux =
     "since they test the cable rather than talk to the agent.\n";
 
 static const char *const help_time =
-    "usage: w98link time [--line PATH] [--baud N] [--set]\n"
+    "usage: devlink time [--line PATH] [--baud N] [--set]\n"
     "\n"
     "Compares the agent's clock with this one and reports the difference.\n"
     "With --set, sets the agent's clock from this machine's first, then\n"
@@ -116,7 +116,7 @@ static const char *const help_time =
     "whole tree or, worse, miss changes.\n";
 
 static const char *const help_put =
-    "usage: w98link put [--line PATH] [--baud N] [--force] LOCAL REMOTE\n"
+    "usage: devlink put [--line PATH] [--baud N] [--force] LOCAL REMOTE\n"
     "\n"
     "Copies LOCAL to REMOTE on the agent, compressed, with a CRC check. The\n"
     "file lands under a temporary name and is renamed once it is verified.\n"
@@ -124,18 +124,18 @@ static const char *const help_put =
     "  --force       overwrite REMOTE if it exists\n";
 
 static const char *const help_get =
-    "usage: w98link get [--line PATH] [--baud N] REMOTE LOCAL\n"
+    "usage: devlink get [--line PATH] [--baud N] REMOTE LOCAL\n"
     "\n"
     "Copies REMOTE from the agent to LOCAL, with the same checks.\n";
 
 static const char *const help_linktest =
-    "usage: w98link linktest [--line PATH] [--baud N] [--bytes N] [--window N]\n"
+    "usage: devlink linktest [--line PATH] [--baud N] [--bytes N] [--window N]\n"
     "                        [--file PATH]\n"
     "\n"
-    "Streams data through 'W98AGENT linktest', which echoes it back, and\n"
+    "Streams data through 'DEVLINK linktest', which echoes it back, and\n"
     "checks every byte. Both directions run at once, compressed.\n"
     "\n"
-    "  --line PATH   serial device (default " DEFAULT_LINE ", or $W98LINK_LINE)\n"
+    "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --bytes N     bytes to stream (default 200000)\n"
     "  --window N    frames in flight, 1-32 (default 16)\n"
@@ -148,7 +148,7 @@ static const char *active_help = NULL;
 
 static int usage_error(const char *what, const char *arg)
 {
-    fprintf(stderr, "w98link: %s '%s'\n\n%s", what, arg,
+    fprintf(stderr, "devlink: %s '%s'\n\n%s", what, arg,
             active_help ? active_help : help_main);
     return 1;
 }
@@ -263,7 +263,7 @@ static int parse_u32(const char *s, const char *what, uint32_t max, uint32_t *ou
     errno = 0;
     v = strtoul(s, &end, 10);
     if (errno != 0 || end == s || *end != '\0' || v > max) {
-        fprintf(stderr, "w98link: invalid %s '%s'\n", what, s);
+        fprintf(stderr, "devlink: invalid %s '%s'\n", what, s);
         return 0;
     }
     *out = (uint32_t)v;
@@ -276,7 +276,7 @@ static int parse_u32(const char *s, const char *what, uint32_t max, uint32_t *ou
 
 static int cmd_echo(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     const char *count_s = NULL;
     const char *size_s = NULL;
@@ -303,7 +303,7 @@ static int cmd_echo(int argc, char **argv)
         return 1;
 
     if (wl_serial_open(line, baud, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     /* A 1 KiB frame takes about 90 ms each way at 115200; a second covers
@@ -311,7 +311,7 @@ static int cmd_echo(int argc, char **argv)
     s = wl_echo_probe(&t, count, size, 1000, &st);
     wl_transport_close(&t);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
 
@@ -336,7 +336,7 @@ static uint8_t *read_file(const char *path, size_t *len_out)
 
     *len_out = 0;
     if (f == NULL) {
-        fprintf(stderr, "w98link: cannot open %s: %s\n", path, strerror(errno));
+        fprintf(stderr, "devlink: cannot open %s: %s\n", path, strerror(errno));
         return NULL;
     }
     if (fseek(f, 0, SEEK_END) == 0)
@@ -349,7 +349,7 @@ static uint8_t *read_file(const char *path, size_t *len_out)
     }
     (void)fclose(f);
     if (data == NULL) {
-        fprintf(stderr, "w98link: cannot read %s: %s\n", path,
+        fprintf(stderr, "devlink: cannot read %s: %s\n", path,
                 len == 0 ? "empty file" : strerror(errno));
         return NULL;
     }
@@ -359,7 +359,7 @@ static uint8_t *read_file(const char *path, size_t *len_out)
 
 static int cmd_linktest(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     const char *bytes_s = NULL;
     const char *window_s = NULL;
@@ -404,7 +404,7 @@ static int cmd_linktest(int argc, char **argv)
     cfg.link.window = (uint8_t)window;
     cfg.link.bytes_per_sec = baud / 10U;
     if (wl_serial_open(line, baud, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         free(data);
         return 1;
     }
@@ -416,7 +416,7 @@ static int cmd_linktest(int argc, char **argv)
     wl_transport_close(&t);
     free(data);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     printf("echoed %llu of %u bytes, %llu corrupt, %u session(s)\n",
@@ -485,7 +485,7 @@ static int start_mux(const char *line, uint32_t baud, const char *sock)
     if (pid == 0) {
         /* execv's signature predates const, so the strings are copied into
          * writable storage rather than cast about. */
-        char prog[] = "w98link";
+        char prog[] = "devlink";
         char sub[] = "mux";
         char line_opt[] = "--line";
         char baud_opt[] = "--baud";
@@ -523,7 +523,7 @@ static int start_mux(const char *line, uint32_t baud, const char *sock)
 
 /*
  * Opens the line for one command: directly, or through the multiplexer when
- * asked for with W98LINK_MUX=1.
+ * asked for with DEVLINK_MUX=1.
  *
  * Opt-in on purpose, and the reason is worth keeping. Routing through a
  * multiplexer changes what a command does to a line that somebody may already
@@ -539,7 +539,7 @@ static int start_mux(const char *line, uint32_t baud, const char *sock)
 static wl_status open_line(const char *line, uint32_t baud, struct wl_session_cfg *cfg,
                            struct wl_transport *t)
 {
-    const char *want = getenv("W98LINK_MUX");
+    const char *want = getenv("DEVLINK_MUX");
     char sock[256];
 
     if (strncmp(line, "unix:", 5) == 0) {
@@ -576,7 +576,7 @@ static volatile sig_atomic_t exec_cancel;
 
 static void on_interrupt(int sig)
 {
-    static const char msg[] = "\nw98link: cancelling on the target...\n";
+    static const char msg[] = "\ndevlink: cancelling on the target...\n";
 
     (void)signal(sig, SIG_DFL);
     exec_cancel = 1;
@@ -585,7 +585,7 @@ static void on_interrupt(int sig)
 
 static int cmd_exec(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     const char *cwd = NULL;
     int merge = 0;
@@ -639,7 +639,7 @@ static int cmd_exec(int argc, char **argv)
     }
 
     if (open_line(line, baud, &cfg, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         free(cmd);
         return 125;
     }
@@ -650,21 +650,21 @@ static int cmd_exec(int argc, char **argv)
     wl_transport_close(&t);
     free(cmd);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 125;
     }
     if (r.cancelled) {
         if (r.cancel_acked)
-            fprintf(stderr, "w98link: cancelled; the command was killed on the target\n");
+            fprintf(stderr, "devlink: cancelled; the command was killed on the target\n");
         else if (r.ran)
-            fprintf(stderr, "w98link: cancelled, but the agent did not answer; the "
+            fprintf(stderr, "devlink: cancelled, but the agent did not answer; the "
                             "command may still be winding down on the target\n");
         else
-            fprintf(stderr, "w98link: cancelled\n");
+            fprintf(stderr, "devlink: cancelled\n");
         return 130;
     }
     if (!r.ran || r.message[0] != '\0') {
-        fprintf(stderr, "w98link: %s\n", r.message[0] ? r.message : "command failed");
+        fprintf(stderr, "devlink: %s\n", r.message[0] ? r.message : "command failed");
         return 125;
     }
     return (int)(r.exit_code & 0xFFU);
@@ -675,7 +675,7 @@ static void report_transfer(const char *verb, const struct wl_file_result *r)
     double secs = (double)r->elapsed_ms / 1000.0;
 
     if (!r->ok) {
-        fprintf(stderr, "w98link: %s failed: %s\n", verb,
+        fprintf(stderr, "devlink: %s failed: %s\n", verb,
                 r->message[0] != '\0' ? r->message : "unknown error");
         return;
     }
@@ -687,7 +687,7 @@ static void report_transfer(const char *verb, const struct wl_file_result *r)
 
 static int cmd_transfer(int argc, char **argv, int is_put)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     int force = 0;
     struct opt opts[] = {
@@ -712,7 +712,7 @@ static int cmd_transfer(int argc, char **argv, int is_put)
         return 1;
 
     if (open_line(line, baud, &cfg, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     if (is_put)
@@ -723,7 +723,7 @@ static int cmd_transfer(int argc, char **argv, int is_put)
                           paths[1], 10000, &r);
     wl_transport_close(&t);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     report_transfer(is_put ? "sent" : "received", &r);
@@ -732,7 +732,7 @@ static int cmd_transfer(int argc, char **argv, int is_put)
 
 static int cmd_sync(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     int delete_extra = 0;
     int dry_run = 0;
@@ -765,14 +765,14 @@ static int cmd_sync(int argc, char **argv)
                       (hidden ? WL_SYNC_HIDDEN : 0));
 
     if (open_line(line, baud, &cfg, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     s = wl_client_sync(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), paths[0],
                        paths[1], flags, 10000, &r);
     wl_transport_close(&t);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     printf("%u file(s) here, %u already there, %u to send\n", (unsigned)r.scanned,
@@ -781,7 +781,7 @@ static int cmd_sync(int argc, char **argv)
      * a plausible summary and exit 0, which is exactly the wrong answer for
      * the command people run before deleting things. */
     if (wl_sync_exit_code(&r) != 0) {
-        fprintf(stderr, "w98link: sync failed: %s\n",
+        fprintf(stderr, "devlink: sync failed: %s\n",
                 r.message[0] != '\0' ? r.message : "unknown error");
         return 1;
     }
@@ -797,7 +797,7 @@ static int cmd_sync(int argc, char **argv)
 
 static int cmd_info(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     struct opt opts[] = {{"--line", &line, NULL}, {"--baud", &baud_s, NULL}};
     uint32_t baud = DEFAULT_BAUD;
@@ -814,13 +814,13 @@ static int cmd_info(int argc, char **argv)
     if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
         return 1;
     if (open_line(line, baud, &cfg, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     s = wl_client_info(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), 10000, &h);
     wl_transport_close(&t);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     printf("agent   %s\n", h.build);
@@ -893,11 +893,11 @@ static int ask_agent(struct wl_transport *t, const struct wl_session_cfg *cfg,
     memset(out, 0, sizeof(*out));
     if (wl_client_exec(t, cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16), cmd, NULL, 0,
                        &io, 10000, &r) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 0;
     }
     if (!r.ran || r.exit_code != 0) {
-        fprintf(stderr, "w98link: %s\n", r.message[0] != '\0' ? r.message : "the agent refused");
+        fprintf(stderr, "devlink: %s\n", r.message[0] != '\0' ? r.message : "the agent refused");
         return 0;
     }
     return 1;
@@ -935,7 +935,7 @@ static void print_difference(long long delta)
 
 static int cmd_time(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     int set = 0;
     struct opt opts[] = {
@@ -960,7 +960,7 @@ static int cmd_time(int argc, char **argv)
     if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
         return 1;
     if (open_line(line, baud, &cfg, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
 
@@ -986,7 +986,7 @@ static int cmd_time(int argc, char **argv)
     wl_transport_close(&t);
     (void)wl_clock_utc(&here);
     if (!reply_number(&reply, "utc", &there)) {
-        fprintf(stderr, "w98link: the agent did not report a time\n");
+        fprintf(stderr, "devlink: the agent did not report a time\n");
         return 1;
     }
     (void)reply_number(&reply, "localoffset", &offset);
@@ -1013,7 +1013,7 @@ static int cmd_time(int argc, char **argv)
     }
     printf("round trip  %u ms\n", (unsigned)rtt);
     if (!set && (there - (long long)here > 2 || (long long)here - there > 2))
-        printf("\nrun 'w98link time --set' to correct it; sync compares file times\n");
+        printf("\nrun 'devlink time --set' to correct it; sync compares file times\n");
     return 0;
 }
 
@@ -1048,7 +1048,7 @@ static int mux_pid_path(const char *sock, char *out, size_t cap)
 
 static int cmd_mux(int argc, char **argv)
 {
-    const char *line = getenv("W98LINK_LINE");
+    const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     const char *idle_s = NULL;
     int stop = 0;
@@ -1076,7 +1076,7 @@ static int cmd_mux(int argc, char **argv)
         return 1;
     if (!wl_mux_socket_path(line, sock, sizeof(sock)) ||
         !mux_pid_path(sock, pidfile, sizeof(pidfile))) {
-        fprintf(stderr, "w98link: cannot build a socket path for %s\n", line);
+        fprintf(stderr, "devlink: cannot build a socket path for %s\n", line);
         return 1;
     }
 
@@ -1092,11 +1092,11 @@ static int cmd_mux(int argc, char **argv)
             (void)fclose(f);
         }
         if (pid <= 0) {
-            fprintf(stderr, "w98link: no multiplexer is running for %s\n", line);
+            fprintf(stderr, "devlink: no multiplexer is running for %s\n", line);
             return 1;
         }
         if (kill((pid_t)pid, SIGTERM) != 0) {
-            fprintf(stderr, "w98link: cannot stop pid %ld: %s\n", pid, strerror(errno));
+            fprintf(stderr, "devlink: cannot stop pid %ld: %s\n", pid, strerror(errno));
             return 1;
         }
         printf("stopping the multiplexer (pid %ld)\n", pid);
@@ -1110,7 +1110,7 @@ static int cmd_mux(int argc, char **argv)
     cfg.stop = mux_should_stop;
     cfg.log = mux_log;
     if (wl_serial_open(line, baud, &t) != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     (void)signal(SIGINT, on_mux_signal);
@@ -1124,7 +1124,7 @@ static int cmd_mux(int argc, char **argv)
     wl_transport_close(&t);
     (void)remove(pidfile);
     if (s != WL_OK) {
-        fprintf(stderr, "w98link: %s\n", wl_error());
+        fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }
     return 0;
@@ -1176,7 +1176,7 @@ int main(int argc, char **argv)
         return 1;
     }
     if (strcmp(argv[1], "--version") == 0) {
-        printf("w98link %s\n", wl_version());
+        printf("devlink %s\n", wl_version());
         return 0;
     }
     if (strcmp(argv[1], "--help") == 0) {

@@ -2,13 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "w98link/clock.h"
-#include "w98link/crc32.h"
-#include "w98link/fs.h"
-#include "w98link/proto.h"
-#include "w98link/sha256.h"
-#include "w98link/sync.h"
-#include "w98link/wire.h"
+#include "devlink/clock.h"
+#include "devlink/crc32.h"
+#include "devlink/fs.h"
+#include "devlink/proto.h"
+#include "devlink/sha256.h"
+#include "devlink/sync.h"
+#include "devlink/wire.h"
 
 #define PUMP_MS 50U
 #define CHUNK 4096U
@@ -50,13 +50,13 @@ struct sync {
     int need_end;
 };
 
-/* Temporary tracing, enabled with W98LINK_DEBUG=1. */
+/* Temporary tracing, enabled with DEVLINK_DEBUG=1. */
 static int trace_on(void)
 {
     static int on = -1;
 
     if (on < 0)
-        on = getenv("W98LINK_DEBUG") != NULL;
+        on = getenv("DEVLINK_DEBUG") != NULL;
     return on;
 }
 

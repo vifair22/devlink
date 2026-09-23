@@ -1,11 +1,11 @@
-#ifndef W98LINK_WIRE_H
-#define W98LINK_WIRE_H
+#ifndef DEVLINK_WIRE_H
+#define DEVLINK_WIRE_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#include "w98link/bytes.h"
+#include "devlink/bytes.h"
 
 /*
  * Bounds-checked field writers and readers for record payloads. Both are

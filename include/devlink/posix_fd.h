@@ -1,7 +1,7 @@
-#ifndef W98LINK_POSIX_FD_H
-#define W98LINK_POSIX_FD_H
+#ifndef DEVLINK_POSIX_FD_H
+#define DEVLINK_POSIX_FD_H
 
-#include "w98link/transport.h"
+#include "devlink/transport.h"
 
 /* Wraps an already-open descriptor as a transport and takes ownership of it.
  * Used for pty pairs in tests, and later for sockets. */

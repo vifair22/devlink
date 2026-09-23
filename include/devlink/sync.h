@@ -1,10 +1,10 @@
-#ifndef W98LINK_SYNC_H
-#define W98LINK_SYNC_H
+#ifndef DEVLINK_SYNC_H
+#define DEVLINK_SYNC_H
 
 #include <stdint.h>
 
-#include "w98link/peer.h"
-#include "w98link/transport.h"
+#include "devlink/peer.h"
+#include "devlink/transport.h"
 
 /*
  * Client side of SYNC: make a directory on the agent match one here, sending

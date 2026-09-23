@@ -6,13 +6,13 @@ is only needed once there is an agent feature to try.
 
 | # | Iteration | Done when |
 |---|-----------|-----------|
-| 0 | Skeleton: repo, Makefile, both builds, gates | `W98AGENT.EXE` built here runs on the A21m |
+| 0 | Skeleton: repo, Makefile, both builds, gates | `DEVLINK.EXE` built here runs on the A21m |
 | 1 | Protocol design (`docs/protocol.md`) | reviewed and agreed before any protocol code |
 | 2 | Framing: COBS, CRC32, frame format | unit tests incl. corrupted and truncated input |
 | 3 | Transport interface, serial on both ends, pty loopback for tests | agent and client echo frames over the real cable |
 | 4 | Reliability: sequence numbers, sliding window, ack/retransmit | survives a lossy simulated link in tests |
 | 5 | Compression: vendored zlib, session-long streams, flush points | measured ratio on source trees; interactive latency OK |
-| 6 | Channels and `exec` with streamed output | done: `w98link exec` runs commands on the A21m |
+| 6 | Channels and `exec` with streamed output | done: `devlink exec` runs commands on the A21m |
 | 7 | `put` / `get` | done: files round-trip byte-exact; the agent updates itself |
 | 8 | `sync`: hash manifests, send only changed files | done: 50-file tree, no changes, syncs in 0.25 s |
 | 9 | TCP transport | same features over the new NIC |
@@ -23,13 +23,13 @@ is only needed once there is an agent feature to try.
 
 Decided 2026-09-23. The wire protocol already multiplexes: channels, per-channel
 credit, round-robin between them, and eight exec slots in the agent. What
-prevents two commands is above it. Every `w98link` invocation is a process that
+prevents two commands is above it. Every `devlink` invocation is a process that
 opens the port, handshakes, runs one command and exits, and the agent serves one
 session, so a second invocation *displaces* the first and kills whatever it was
 running. That has cost a running install.
 
 The fix is local and needs no protocol or agent change: one process owns the
-port and keeps a single session, and each `w98link` invocation talks to it over
+port and keeps a single session, and each `devlink` invocation talks to it over
 a Unix socket, getting its own channel. Two side benefits, neither small: the
 per-command handshake disappears, and so does the per-command deflate stream, so
 compression context survives across commands instead of restarting from nothing
@@ -118,8 +118,8 @@ what matters is API discipline in `src/win32/`:
 - The handshake reports the platform (GetVersionEx dwPlatformId) so the
   client can adapt, e.g. cmd.exe vs command.com for `exec`.
 
-Names in this repo still say 98: the project directory, `make win98`,
-`W98AGENT.EXE`, `include/w98link/`. They all change in one mechanical commit
+Names in this repo still say 98: the project directory, `make agent`,
+`DEVLINK.EXE`, `include/devlink/`. They all change in one mechanical commit
 when the project gets its real name, which has not been chosen yet; renaming
 twice would be worse than carrying a wrong name for a while.
 

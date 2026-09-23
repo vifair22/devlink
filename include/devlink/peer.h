@@ -1,11 +1,11 @@
-#ifndef W98LINK_PEER_H
-#define W98LINK_PEER_H
+#ifndef DEVLINK_PEER_H
+#define DEVLINK_PEER_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/session.h"
-#include "w98link/transport.h"
+#include "devlink/session.h"
+#include "devlink/transport.h"
 
 /*
  * Mux and control channel (docs/protocol.md, "Mux layer" and "Control

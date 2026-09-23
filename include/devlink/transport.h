@@ -1,10 +1,10 @@
-#ifndef W98LINK_TRANSPORT_H
-#define W98LINK_TRANSPORT_H
+#ifndef DEVLINK_TRANSPORT_H
+#define DEVLINK_TRANSPORT_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/status.h"
+#include "devlink/status.h"
 
 /*
  * A byte pipe to the peer: a serial port now, a TCP socket later. The core

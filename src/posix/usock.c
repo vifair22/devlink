@@ -6,8 +6,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "w98link/posix_fd.h"
-#include "w98link/usock.h"
+#include "devlink/posix_fd.h"
+#include "devlink/usock.h"
 
 static wl_status fill_address(const char *path, struct sockaddr_un *addr, socklen_t *len)
 {

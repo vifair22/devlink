@@ -7,7 +7,7 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/clock.h"
+#include "devlink/clock.h"
 
 static void test_write_then_read(void **state)
 {

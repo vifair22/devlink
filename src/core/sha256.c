@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "w98link/sha256.h"
+#include "devlink/sha256.h"
 
 /* FIPS 180-4. Straightforward implementation: the link moves 11 KB/s, so
  * hashing is never the bottleneck. */

@@ -1,5 +1,5 @@
-#ifndef W98LINK_BYTES_H
-#define W98LINK_BYTES_H
+#ifndef DEVLINK_BYTES_H
+#define DEVLINK_BYTES_H
 
 #include <stdint.h>
 

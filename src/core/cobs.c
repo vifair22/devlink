@@ -1,4 +1,4 @@
-#include "w98link/cobs.h"
+#include "devlink/cobs.h"
 
 wl_status wl_cobs_encode(const uint8_t *in, size_t n, uint8_t *out, size_t cap,
                          size_t *out_len)

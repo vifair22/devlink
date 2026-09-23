@@ -8,7 +8,7 @@
 #include <cmocka.h>
 
 #include "sim_line.h"
-#include "w98link/link.h"
+#include "devlink/link.h"
 
 /*
  * Two links joined by a simulated serial line, in virtual time. The line

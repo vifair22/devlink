@@ -4,8 +4,8 @@
 #include <pty.h>
 #include <unistd.h>
 
-#include "w98link/posix_fd.h"
-#include "w98link/transport.h"
+#include "devlink/posix_fd.h"
+#include "devlink/transport.h"
 
 /* A pty pair stands in for a null-modem cable: the slave side is opened as a
  * serial port through wl_serial_open (so the termios setup is exercised),

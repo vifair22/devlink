@@ -1,11 +1,11 @@
-#ifndef W98LINK_ECHO_H
-#define W98LINK_ECHO_H
+#ifndef DEVLINK_ECHO_H
+#define DEVLINK_ECHO_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/frame.h"
-#include "w98link/transport.h"
+#include "devlink/frame.h"
+#include "devlink/transport.h"
 
 /*
  * Frame echo test: the first thing run over a new cable, port or build. One

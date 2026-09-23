@@ -1,10 +1,10 @@
-#ifndef W98LINK_AGENT_H
-#define W98LINK_AGENT_H
+#ifndef DEVLINK_AGENT_H
+#define DEVLINK_AGENT_H
 
 #include <stdint.h>
 
-#include "w98link/peer.h"
-#include "w98link/transport.h"
+#include "devlink/peer.h"
+#include "devlink/transport.h"
 
 /*
  * The agent's serving loop: answers whatever client connects on the

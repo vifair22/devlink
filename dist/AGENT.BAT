@@ -1,18 +1,18 @@
 @echo off
-rem The w98link agent on Windows 2000.
+rem The devlink agent on Windows 2000.
 rem
 rem Starting it: run this file. Leave the window open; it serves one client
 rem at a time for as long as it runs.
 rem
-rem Updating it: the client uploads W98AGENT.NEW and runs "@stop". The agent
+rem Updating it: the client uploads DEVLINK.NEW and runs "@stop". The agent
 rem exits 0, this loop moves the new binary into place, and serving resumes.
 rem
 rem Stopping it: Ctrl-C, then Y to the "Terminate batch job" prompt.
-cd /d C:\W98AGENT
+cd /d C:\DEVLINK
 :top
-W98AGENT.EXE serve COM1 115200
+DEVLINK.EXE serve COM1 115200
 if errorlevel 1 goto failed
-if exist W98AGENT.NEW move /y W98AGENT.NEW W98AGENT.EXE >nul
+if exist DEVLINK.NEW move /y DEVLINK.NEW DEVLINK.EXE >nul
 goto top
 :failed
 echo.

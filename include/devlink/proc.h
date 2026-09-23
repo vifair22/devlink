@@ -1,10 +1,10 @@
-#ifndef W98LINK_PROC_H
-#define W98LINK_PROC_H
+#ifndef DEVLINK_PROC_H
+#define DEVLINK_PROC_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/status.h"
+#include "devlink/status.h"
 
 /*
  * A child process with piped standard streams, driven without blocking: the

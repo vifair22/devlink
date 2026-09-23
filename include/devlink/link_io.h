@@ -1,10 +1,10 @@
-#ifndef W98LINK_LINK_IO_H
-#define W98LINK_LINK_IO_H
+#ifndef DEVLINK_LINK_IO_H
+#define DEVLINK_LINK_IO_H
 
 #include <stdint.h>
 
-#include "w98link/link.h"
-#include "w98link/transport.h"
+#include "devlink/link.h"
+#include "devlink/transport.h"
 
 /*
  * Glue between the I/O-free link state machine and a real transport: one

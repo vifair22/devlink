@@ -1,10 +1,10 @@
-#ifndef W98LINK_FS_H
-#define W98LINK_FS_H
+#ifndef DEVLINK_FS_H
+#define DEVLINK_FS_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/status.h"
+#include "devlink/status.h"
 
 /*
  * The few file operations that are not portable through stdio: metadata,

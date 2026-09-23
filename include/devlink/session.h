@@ -1,11 +1,11 @@
-#ifndef W98LINK_SESSION_H
-#define W98LINK_SESSION_H
+#ifndef DEVLINK_SESSION_H
+#define DEVLINK_SESSION_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/link.h"
-#include "w98link/transport.h"
+#include "devlink/link.h"
+#include "devlink/transport.h"
 
 /*
  * Compression layer (docs/protocol.md, "Compression layer"): one raw deflate

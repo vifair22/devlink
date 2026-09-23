@@ -6,13 +6,13 @@ on the same run as `bug-sync-hash-starves-link.md`.
 ## What happened
 
 ```
-$ w98link sync --dry-run --hidden /run/media/vifair/G60SDFW/OFFICE97PRO C:/Office/OFFICE97PRO
-w98link: no answer from the agent within 10 s
+$ devlink sync --dry-run --hidden /run/media/vifair/G60SDFW/OFFICE97PRO C:/Office/OFFICE97PRO
+devlink: no answer from the agent within 10 s
 ```
 
 The local tree was 5,771 files, 671 MB, read from a USB stick with a cold
 page cache. The run took 37 s of wall time and 14 s of CPU, nearly all of it
-hashing. `w98link info` answered straight afterwards, so the agent was fine.
+hashing. `devlink info` answered straight afterwards, so the agent was fine.
 Rerunning the same sync from a warm cache (about 8 s of CPU) connected
 normally.
 

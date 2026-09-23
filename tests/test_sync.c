@@ -12,10 +12,10 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/agent.h"
-#include "w98link/fs.h"
-#include "w98link/proto.h"
-#include "w98link/sync.h"
+#include "devlink/agent.h"
+#include "devlink/fs.h"
+#include "devlink/proto.h"
+#include "devlink/sync.h"
 
 /* Directory sync end to end: the real agent in a thread, the real client, a
  * pty between them, and two real directory trees. */
@@ -69,7 +69,7 @@ static struct wl_session_cfg fast_session(void)
 static int setup(void **state)
 {
     (void)state;
-    (void)snprintf(base, sizeof(base), "/tmp/w98link-sync-%d", (int)getpid());
+    (void)snprintf(base, sizeof(base), "/tmp/devlink-sync-%d", (int)getpid());
     (void)snprintf(src_dir, sizeof(src_dir), "%s/src", base);
     (void)snprintf(dst_dir, sizeof(dst_dir), "%s/dst", base);
     assert_int_equal(mkdir(base, 0700), 0);

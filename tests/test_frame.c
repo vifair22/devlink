@@ -7,8 +7,8 @@
 
 #include <cmocka.h>
 
-#include "w98link/crc32.h"
-#include "w98link/frame.h"
+#include "devlink/crc32.h"
+#include "devlink/frame.h"
 
 /* Frames delivered by the receiver, copied out because the payload pointer
  * is only valid during the callback. */

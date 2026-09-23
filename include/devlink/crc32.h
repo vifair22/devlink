@@ -1,5 +1,5 @@
-#ifndef W98LINK_CRC32_H
-#define W98LINK_CRC32_H
+#ifndef DEVLINK_CRC32_H
+#define DEVLINK_CRC32_H
 
 #include <stddef.h>
 #include <stdint.h>

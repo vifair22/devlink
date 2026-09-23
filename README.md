@@ -1,4 +1,4 @@
-# w98link
+# devlink
 
 A compressed file and command link between a Linux workstation and an old
 Windows machine, for developing here and building and running there. It exists
@@ -8,8 +8,8 @@ something Linux pppd speaks.
 
 Two programs share one protocol core:
 
-- `w98link`, the Linux client
-- `W98AGENT.EXE`, the Win32 agent, cross-built with Open Watcom
+- `devlink`, the Linux client
+- `DEVLINK.EXE`, the Win32 agent, cross-built with Open Watcom
 
 The target is **Windows 2000**. Windows 98 SE and NT 4.0 still work and the
 code for them is kept, but nothing is verified on them any more; see
@@ -44,8 +44,8 @@ without errors. `make tidy` says so when it skips the Win32 half for want of
 those headers.
 
 ```sh
-make            # Linux client -> build/bin/w98link
-make win98      # Win98 agent  -> build/bin/W98AGENT.EXE
+make            # Linux client -> build/bin/devlink
+make agent      # Win98 agent  -> build/bin/DEVLINK.EXE
 make dist       # agent + launcher + README, staged for the target
                 # (make dist DEST=/run/media/you/STICK writes it to a stick)
 make test       # cmocka suite

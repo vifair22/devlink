@@ -6,17 +6,17 @@ client `0.1.0_20260922.1623.release`, Windows 98 SE 4.10.2222 on the A21m.
 ## What happened
 
 ```sh
-w98link exec 'dir D:\'      # D: is the A21m's CD drive, no disc in it
+devlink exec 'dir D:\'      # D: is the A21m's CD drive, no disc in it
 ```
 
 The client got no output and was killed by an outer `timeout 30`. After
 that, every new client failed:
 
 ```
-$ w98link info
-w98link: no answer from the agent within 10 s
-$ w98link exec 'dir E:\'
-w98link: no answer from the agent within 10 s     (exit 125)
+$ devlink info
+devlink: no answer from the agent within 10 s
+$ devlink exec 'dir E:\'
+devlink: no answer from the agent within 10 s     (exit 125)
 ```
 
 The agent answered again only after someone at the A21m dealt with the
@@ -87,7 +87,7 @@ stop the agent answering a new client. Worth considering alongside the fix:
 ## Reproducing
 
 1. Target with an empty removable drive (the A21m's `D:`).
-2. `w98link exec 'dir D:\'`, then from another shell `w98link info`.
+2. `devlink exec 'dir D:\'`, then from another shell `devlink info`.
 3. Watch the agent console on the target. Record which prompt appears and
    what the agent logs, then pick Fail and see whether the agent recovers
    by itself.
@@ -97,13 +97,13 @@ each step of `wl_proc_free`, will show where teardown stops.
 
 ## Test once fixed
 
-- `w98link exec 'dir D:\'` with no disc returns promptly with a non-zero
+- `devlink exec 'dir D:\'` with no disc returns promptly with a non-zero
   status and no prompt on the target.
-- Start `w98link exec` on a command that never exits (a test program that
+- Start `devlink exec` on a command that never exits (a test program that
   loops forever; `pause` will not do, since v1 gives it end of file at once),
-  then run `w98link info` from a second client. It must answer within its
+  then run `devlink info` from a second client. It must answer within its
   timeout.
-- `w98link get D:/x ./x` with no disc fails cleanly rather than prompting.
+- `devlink get D:/x ./x` with no disc fails cleanly rather than prompting.
 
 ## Fixed 2026-09-22
 
@@ -122,17 +122,17 @@ each step of `wl_proc_free`, will show where teardown stops.
 
 ## Verified on the target 2026-09-22, agent build 1904
 
-Repro run against the fixed agent at `C:\W98AGENT`, D: empty:
+Repro run against the fixed agent at `C:\DEVLINK`, D: empty:
 
 ```
-$ w98link exec 'dir D:\'
+$ devlink exec 'dir D:\'
 General failure reading drive D
 Abort, Retry, Fail?                       (client killed by timeout 30, rc 124)
-$ w98link info                            (immediately after)
-w98link: no answer from the agent within 10 s
-$ w98link info
-w98link: no answer from the agent within 10 s
-$ w98link info                            (about 40 s after the repro)
+$ devlink info                            (immediately after)
+devlink: no answer from the agent within 10 s
+$ devlink info
+devlink: no answer from the agent within 10 s
+$ devlink info                            (about 40 s after the repro)
 agent    0.1.0_20260922.1904.win98
 ```
 
@@ -164,7 +164,7 @@ inside a DOS VM we cannot reach. Options, in order of appeal:
 2. Give the client a way to give up on one command without killing the
    session: a CANCEL record on the exec channel, mapped to the existing
    `wl_proc_kill`/reaper path. **Done 2026-09-22**: `WL_EXEC_CANCEL`, raised
-   by Ctrl-C in `w98link exec`, answered immediately by the agent with EXIT
+   by Ctrl-C in `devlink exec`, answered immediately by the agent with EXIT
    130 and CLOSE. The wedged child goes to the reaper while the session
    stays up, so the next client is not waiting behind a teardown. Covered by
    `test_cancel_stops_the_command_on_the_agent`.
@@ -177,11 +177,11 @@ inside a DOS VM we cannot reach. Options, in order of appeal:
 ## Verified again on the target 2026-09-22, agent build 2206
 
 ```
-$ w98link exec 'dir D:\'
-w98link: drive D: is not ready                    (exit 125, 76 ms)
-$ w98link info
+$ devlink exec 'dir D:\'
+devlink: drive D: is not ready                    (exit 125, 76 ms)
+$ devlink info
 agent    0.1.0_20260922.2206.win98                (43 ms)
-$ w98link exec 'dir C:\W98AGENT'
+$ devlink exec 'dir C:\DEVLINK'
  Volume in drive C is WIN98 ...                   (unaffected)
 ```
 

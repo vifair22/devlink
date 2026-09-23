@@ -6,8 +6,8 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#include "w98link/fs.h"
-#include "w98link/proto.h"
+#include "devlink/fs.h"
+#include "devlink/proto.h"
 
 wl_status wl_fs_stat(const char *path, uint64_t *size, uint64_t *mtime, int *is_dir)
 {

@@ -3,8 +3,8 @@
 
 #include <zlib.h>
 
-#include "w98link/link_io.h"
-#include "w98link/session.h"
+#include "devlink/link_io.h"
+#include "devlink/session.h"
 
 /* Compressed bytes between deflate and the link, and between the link and
  * inflate. Small: they only smooth the hand-off, the queues above are the

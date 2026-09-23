@@ -1,11 +1,11 @@
-#ifndef W98LINK_LINKTEST_H
-#define W98LINK_LINKTEST_H
+#ifndef DEVLINK_LINKTEST_H
+#define DEVLINK_LINKTEST_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/session.h"
-#include "w98link/transport.h"
+#include "devlink/session.h"
+#include "devlink/transport.h"
 
 /*
  * Link throughput and integrity test over a real port, through the full

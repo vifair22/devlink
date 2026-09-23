@@ -1,6 +1,6 @@
 #include <time.h>
 
-#include "w98link/clock.h"
+#include "devlink/clock.h"
 
 uint32_t wl_clock_ms(void)
 {

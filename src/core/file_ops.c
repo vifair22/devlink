@@ -2,12 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "w98link/clock.h"
-#include "w98link/crc32.h"
-#include "w98link/file_ops.h"
-#include "w98link/fs.h"
-#include "w98link/proto.h"
-#include "w98link/wire.h"
+#include "devlink/clock.h"
+#include "devlink/crc32.h"
+#include "devlink/file_ops.h"
+#include "devlink/fs.h"
+#include "devlink/proto.h"
+#include "devlink/wire.h"
 
 #define PUMP_MS 50U
 #define CHUNK 4096U

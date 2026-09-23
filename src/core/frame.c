@@ -1,8 +1,8 @@
 #include <string.h>
 
-#include "w98link/bytes.h"
-#include "w98link/crc32.h"
-#include "w98link/frame.h"
+#include "devlink/bytes.h"
+#include "devlink/crc32.h"
+#include "devlink/frame.h"
 
 static int type_valid(uint8_t type)
 {

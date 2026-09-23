@@ -1,11 +1,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "w98link/link_io.h"
-#include "w98link/peer.h"
-#include "w98link/proto.h"
-#include "w98link/version.h"
-#include "w98link/wire.h"
+#include "devlink/link_io.h"
+#include "devlink/peer.h"
+#include "devlink/proto.h"
+#include "devlink/version.h"
+#include "devlink/wire.h"
 
 /* Serialized records waiting for the session, per channel. Big enough for
  * one maximum-size record plus a few bulk chunks behind it. */

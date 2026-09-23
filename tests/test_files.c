@@ -12,10 +12,10 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/agent.h"
-#include "w98link/file_ops.h"
-#include "w98link/fs.h"
-#include "w98link/proto.h"
+#include "devlink/agent.h"
+#include "devlink/file_ops.h"
+#include "devlink/fs.h"
+#include "devlink/proto.h"
 
 /* PUT and GET end to end: the real agent in a thread, the real client, a pty
  * between them, and real files in a temporary directory. */
@@ -55,7 +55,7 @@ static struct wl_session_cfg fast_session(void)
 static int setup(void **state)
 {
     (void)state;
-    (void)snprintf(dir, sizeof(dir), "/tmp/w98link-test-%d", (int)getpid());
+    (void)snprintf(dir, sizeof(dir), "/tmp/devlink-test-%d", (int)getpid());
     assert_int_equal(mkdir(dir, 0700), 0);
     memset(&agent, 0, sizeof(agent));
     pty_pair(&agent.t, &client_t);

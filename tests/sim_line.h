@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/link.h"
+#include "devlink/link.h"
 
 #define SIM_CHAN_CAP (1U << 18)
 

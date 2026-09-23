@@ -1,11 +1,11 @@
-#ifndef W98LINK_MUX_H
-#define W98LINK_MUX_H
+#ifndef DEVLINK_MUX_H
+#define DEVLINK_MUX_H
 
 #include <stdint.h>
 
-#include "w98link/peer.h"
-#include "w98link/session.h"
-#include "w98link/transport.h"
+#include "devlink/peer.h"
+#include "devlink/session.h"
+#include "devlink/transport.h"
 
 /*
  * The local multiplexer (docs/plan.md, iteration 11).

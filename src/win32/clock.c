@@ -1,6 +1,6 @@
 #include <windows.h>
 
-#include "w98link/clock.h"
+#include "devlink/clock.h"
 #include "wintime.h"
 
 /* GetTickCount exists on every Win32 and wraps at 49.7 days, which matches

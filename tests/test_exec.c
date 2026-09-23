@@ -13,11 +13,11 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/clock.h"
-#include "w98link/wire.h"
-#include "w98link/agent.h"
-#include "w98link/client_exec.h"
-#include "w98link/proto.h"
+#include "devlink/clock.h"
+#include "devlink/wire.h"
+#include "devlink/agent.h"
+#include "devlink/client_exec.h"
+#include "devlink/proto.h"
 
 /*
  * EXEC end to end: the real agent loop (with the POSIX process backend) in a
@@ -327,7 +327,7 @@ static void test_cancel_stops_the_command_on_the_agent(void **state)
     (void)state;
     memset(&cap, 0, sizeof(cap));
     test_cancel = 0;
-    sprintf(marker, "/tmp/w98link-cancel-%ld", (long)getpid());
+    sprintf(marker, "/tmp/devlink-cancel-%ld", (long)getpid());
     (void)remove(marker);
     sprintf(cmd, "sleep 2; touch %s", marker);
 
@@ -397,7 +397,7 @@ static void test_ready_drives_and_colons_are_not_refused(void **state)
  * report: names as stored, exact sizes, a real status. */
 static void test_agent_dir_lists_a_directory(void **state)
 {
-    char dir[] = "/tmp/w98link-dir-XXXXXX";
+    char dir[] = "/tmp/devlink-dir-XXXXXX";
     struct wl_exec_result r;
     char cmd[128];
     char path[128];
@@ -436,7 +436,7 @@ static void test_agent_dir_lists_a_directory(void **state)
  * through the same flow control as a command's output. */
 static void test_agent_dir_handles_a_big_directory(void **state)
 {
-    char dir[] = "/tmp/w98link-big-XXXXXX";
+    char dir[] = "/tmp/devlink-big-XXXXXX";
     struct wl_exec_result r;
     char cmd[128];
     char path[160];

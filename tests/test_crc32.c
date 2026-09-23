@@ -6,7 +6,7 @@
 
 #include <cmocka.h>
 
-#include "w98link/crc32.h"
+#include "devlink/crc32.h"
 
 /* The standard check value: CRC-32 of the ASCII digits "123456789". */
 static void test_check_value(void **state)

@@ -2,14 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "w98link/agent.h"
-#include "w98link/clock.h"
-#include "w98link/crc32.h"
-#include "w98link/fs.h"
-#include "w98link/proc.h"
-#include "w98link/proto.h"
-#include "w98link/sha256.h"
-#include "w98link/wire.h"
+#include "devlink/agent.h"
+#include "devlink/clock.h"
+#include "devlink/crc32.h"
+#include "devlink/fs.h"
+#include "devlink/proc.h"
+#include "devlink/proto.h"
+#include "devlink/sha256.h"
+#include "devlink/wire.h"
 
 #define LOOP_MS 20U
 #define OUT_CHUNK 4096U

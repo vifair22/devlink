@@ -1,5 +1,5 @@
-#ifndef W98LINK_PROTO_H
-#define W98LINK_PROTO_H
+#ifndef DEVLINK_PROTO_H
+#define DEVLINK_PROTO_H
 
 /*
  * Constants from docs/protocol.md, above the compression layer. Kept in one

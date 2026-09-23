@@ -1,8 +1,8 @@
-# w98link - compressed file/command link between Linux and Windows 98
+# devlink - compressed file, command and sync link to an old Windows machine
 #
 # make              build the Linux client into build/bin/
 # make debug asan   the other Linux build variants
-# make win98        cross-build the Win98 agent with Open Watcom
+# make agent        cross-build the Windows agent with Open Watcom
 # make test         build and run the cmocka suite
 # make test-junit   the same suite, with JUnit XML under build/junit/
 # make coverage     run the suite under gcov and enforce the line gate
@@ -11,7 +11,7 @@
 # make clean        remove build/
 #
 # Build artifacts live under build/, one subdirectory per variant, with the
-# ready-to-run binaries (both the client and W98AGENT.EXE) in build/bin/.
+# ready-to-run binaries (both the client and DEVLINK.EXE) in build/bin/.
 
 PYTHON ?= python3
 
@@ -59,7 +59,7 @@ HARDENING := -fstack-protector-strong -fstack-clash-protection
 
 # -isystem, so zlib.h is held to system-header rules rather than ours.
 CPPFLAGS_COMMON := -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_GNU_SOURCE \
-                   -DW98LINK_VERSION='"$(VERSION)_$(BUILD_ID).$(VARIANT)"'
+                   -DDEVLINK_VERSION='"$(VERSION)_$(BUILD_ID).$(VARIANT)"'
 CFLAGS_COMMON   := -std=c11 $(WARNINGS) $(HARDENING) -Werror
 
 RELEASE_FLAGS  := -O3 -flto -DNDEBUG
@@ -67,22 +67,22 @@ DEBUG_FLAGS    := -Og -g3 -fno-omit-frame-pointer
 ASAN_FLAGS     := -Og -g3 -fsanitize=address,undefined -fno-omit-frame-pointer
 COVERAGE_FLAGS := -Og -g --coverage
 
-.PHONY: all release debug asan win98 dist test test-junit coverage coverage-run \
+.PHONY: all release debug asan agent dist test test-junit coverage coverage-run \
         analyze tidy clean help variant
 
 all: release
 
 release:
 	@$(MAKE) --no-print-directory variant VARIANT=release \
-	    VARIANT_FLAGS="$(RELEASE_FLAGS)" OUT=$(BIN_DIR)/w98link
+	    VARIANT_FLAGS="$(RELEASE_FLAGS)" OUT=$(BIN_DIR)/devlink
 
 debug:
 	@$(MAKE) --no-print-directory variant VARIANT=debug \
-	    VARIANT_FLAGS="$(DEBUG_FLAGS)" OUT=$(BIN_DIR)/w98link-debug
+	    VARIANT_FLAGS="$(DEBUG_FLAGS)" OUT=$(BIN_DIR)/devlink-debug
 
 asan:
 	@$(MAKE) --no-print-directory variant VARIANT=asan \
-	    VARIANT_FLAGS="$(ASAN_FLAGS)" OUT=$(BIN_DIR)/w98link-asan
+	    VARIANT_FLAGS="$(ASAN_FLAGS)" OUT=$(BIN_DIR)/devlink-asan
 
 OBJ_DIR := $(BUILD_DIR)/$(VARIANT)
 OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(NATIVE_SOURCES))
@@ -114,7 +114,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 # relink was going to happen anyway. (The Win98 agent needs none of this: one
 # wcl386 call compiles every file every time.)
 $(OBJ_DIR)/core/version.o: $(filter-out $(SRC_DIR)/core/version.c,$(NATIVE_SOURCES)) \
-                           $(wildcard $(INC_DIR)/w98link/*.h) release_version
+                           $(wildcard $(INC_DIR)/devlink/*.h) release_version
 
 $(BIN_DIR):
 	@mkdir -p $@
@@ -122,7 +122,7 @@ $(BIN_DIR):
 -include $(shell find $(BUILD_DIR) -name '*.d' 2>/dev/null)
 
 # ---------------------------------------------------------------------------
-# Win98 agent (Open Watcom cross-build)
+# Windows agent (Open Watcom cross-build)
 # ---------------------------------------------------------------------------
 
 # Watcom lives outside the system package manager, unpacked from the upstream
@@ -130,17 +130,17 @@ $(BIN_DIR):
 WATCOM   ?= $(HOME)/.local/opt/watcom
 WAT_ENV  := WATCOM=$(WATCOM) INCLUDE=$(WATCOM)/h:$(WATCOM)/h/nt \
             PATH=$(WATCOM)/binl64:$(WATCOM)/binl:$$PATH
-WAT_DIR  := $(BUILD_DIR)/win98
-AGENT    := $(BIN_DIR)/W98AGENT.EXE
+WAT_DIR  := $(BUILD_DIR)/agent
+AGENT    := $(BIN_DIR)/DEVLINK.EXE
 
 # -bt=nt/-l=nt is Watcom's Win32 console target, which covers Win9x as well as
 # NT. -za99 is its C99 mode; -w4 -we is the closest it has to -Wall -Werror.
 # -k sets the main thread's stack explicitly (1 MiB) rather than trusting the
 # linker default; a few functions keep a maximum-size record on the stack.
 WAT_FLAGS := -q -bt=nt -l=nt -za99 -w4 -we -ox -k1048576 -I$(INC_DIR) \
-             '-dW98LINK_VERSION="$(VERSION)_$(BUILD_ID).win98"'
+             '-dDEVLINK_VERSION="$(VERSION)_$(BUILD_ID).agent"'
 
-win98: $(AGENT)
+agent: $(AGENT)
 
 WAT_ZLIB_FLAGS := -q -bt=nt -za99 -w0 -ox -I$(ZLIB_DIR)
 WAT_ZLIB_OBJS  := $(patsubst $(ZLIB_DIR)/%.c,$(WAT_DIR)/zlib/%.obj,$(ZLIB_SOURCES))
@@ -169,7 +169,7 @@ TEST_BINS    := $(patsubst $(TEST_DIR)/test_%.c,$(BIN_DIR)/test_%,$(TEST_SOURCES
 # test that should now fail keeps passing. That happened while proving the
 # concurrency test discriminates, which is the one job a stale test binary
 # cannot do.
-TEST_DEPS := $(wildcard $(INC_DIR)/w98link/*.h) $(wildcard $(TEST_DIR)/*.h)
+TEST_DEPS := $(wildcard $(INC_DIR)/devlink/*.h) $(wildcard $(TEST_DIR)/*.h)
 
 $(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(TEST_DEPS) $(ZLIB_LIB) | $(BIN_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
@@ -196,10 +196,10 @@ test-junit: $(TEST_BINS)
 DEST ?= $(BUILD_DIR)/dist
 
 dist: $(AGENT)
-	@mkdir -p $(DEST)/W98AGENT
-	cp $(AGENT) $(DEST)/W98AGENT/
-	cp dist/AGENT.BAT dist/README.TXT $(DEST)/W98AGENT/
-	@echo "staged in $(DEST)/W98AGENT: copy that folder to C:\\ on the target"
+	@mkdir -p $(DEST)/DEVLINK
+	cp $(AGENT) $(DEST)/DEVLINK/
+	cp dist/AGENT.BAT dist/README.TXT $(DEST)/DEVLINK/
+	@echo "staged in $(DEST)/DEVLINK: copy that folder to C:\\ on the target"
 
 coverage:
 	@$(MAKE) --no-print-directory coverage-run VARIANT=coverage
@@ -263,7 +263,7 @@ tidy:
 	    echo "== win32"; \
 	    clang-tidy $(AGENT_SOURCES) -- --target=i686-w64-mingw32 $(WIN_TIDY_INC) \
 	        -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_WIN32_WINNT=0x0500 -DVARIANT=tidy \
-	        -DW98LINK_VERSION='"0.0.0_tidy"' -std=c11 -Wno-cast-qual; \
+	        -DDEVLINK_VERSION='"0.0.0_tidy"' -std=c11 -Wno-cast-qual; \
 	fi
 
 # ---------------------------------------------------------------------------

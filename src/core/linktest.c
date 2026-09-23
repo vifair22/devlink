@@ -1,7 +1,7 @@
 #include <string.h>
 
-#include "w98link/clock.h"
-#include "w98link/linktest.h"
+#include "devlink/clock.h"
+#include "devlink/linktest.h"
 
 #define PUMP_MS 50U
 

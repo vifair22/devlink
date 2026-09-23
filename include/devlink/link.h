@@ -1,11 +1,11 @@
-#ifndef W98LINK_LINK_H
-#define W98LINK_LINK_H
+#ifndef DEVLINK_LINK_H
+#define DEVLINK_LINK_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#include "w98link/frame.h"
-#include "w98link/status.h"
+#include "devlink/frame.h"
+#include "devlink/status.h"
 
 /*
  * Serial link state machine (docs/protocol.md, "Link layer: serial"): turns

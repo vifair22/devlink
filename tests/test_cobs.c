@@ -7,7 +7,7 @@
 
 #include <cmocka.h>
 
-#include "w98link/cobs.h"
+#include "devlink/cobs.h"
 
 static void check_vector(const uint8_t *raw, size_t raw_len, const uint8_t *enc,
                          size_t enc_len)

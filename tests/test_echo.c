@@ -8,7 +8,7 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/echo.h"
+#include "devlink/echo.h"
 
 struct server {
     struct wl_transport t;

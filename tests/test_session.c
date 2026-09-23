@@ -10,7 +10,7 @@
 #include <cmocka.h>
 
 #include "sim_line.h"
-#include "w98link/session.h"
+#include "devlink/session.h"
 
 /*
  * Compression over the simulated line. The corpus is this repository's own C
@@ -51,7 +51,7 @@ static const struct sim_line_cfg serial_115200 = {11520, 2000, 0, 0, 0};
 
 static void load_corpus(void)
 {
-    static const char *const patterns[] = {"src/*/*.c", "include/w98link/*.h",
+    static const char *const patterns[] = {"src/*/*.c", "include/devlink/*.h",
                                            "tests/*.c", "third_party/zlib/*.[ch]"};
     size_t cap = 1U << 20;
 

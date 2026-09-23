@@ -6,7 +6,7 @@
 
 #include <cmocka.h>
 
-#include "w98link/version.h"
+#include "devlink/version.h"
 
 /* The handshake will compare these strings byte for byte, so the format is a
  * contract: semver, underscore, build stamp, dot, variant. */

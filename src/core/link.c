@@ -3,8 +3,8 @@
 
 #include <stdio.h>
 
-#include "w98link/bytes.h"
-#include "w98link/link.h"
+#include "devlink/bytes.h"
+#include "devlink/link.h"
 
 /* Timer constants from docs/protocol.md, "Session start", "Reliability" and
  * "Liveness". */

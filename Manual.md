@@ -1,4 +1,4 @@
-# w98link Manual
+# devlink Manual
 
 A compressed, reliable link between a Linux workstation and a Windows 2000 or
 NT machine, over a serial cable now and over TCP later. This manual covers
@@ -30,8 +30,8 @@ Two programs:
 
 | Program | Runs on | Purpose |
 |---------|---------|---------|
-| `w98link` | Linux | the client: you type commands to it |
-| `W98AGENT.EXE` | Windows 2000 (also NT 4.0 and 98 SE) | the agent: it serves one client at a time |
+| `devlink` | Linux | the client: you type commands to it |
+| `DEVLINK.EXE` | Windows 2000 (also NT 4.0 and 98 SE) | the agent: it serves one client at a time |
 
 Both are built from the same protocol core, so both ends always agree on the
 format. The client always starts the conversation; the agent never calls out.
@@ -69,8 +69,8 @@ upstream Linux release into `~/.local/opt/watcom`, or point `WATCOM=` at it.
 ## 3. Building
 
 ```sh
-make            # the client       -> build/bin/w98link
-make win98      # the agent        -> build/bin/W98AGENT.EXE
+make            # the client       -> build/bin/devlink
+make agent      # the agent        -> build/bin/DEVLINK.EXE
 make test       # the whole suite
 make coverage   # line coverage, gated at 80%
 make analyze    # cppcheck, gcc -fanalyzer, stack usage
@@ -94,17 +94,17 @@ The agent is one executable plus a launcher batch file. Getting the first copy
 across needs some existing channel: a USB stick, a network share, or Kermit.
 After that the agent updates itself over its own link (section 11).
 
-1. Copy `build/bin/W98AGENT.EXE` to a directory on the target, for example
-   `C:\W98LINK`.
-2. Create `C:\W98LINK\AGENT.BAT`:
+1. Copy `build/bin/DEVLINK.EXE` to a directory on the target, for example
+   `C:\DEVLINK`.
+2. Create `C:\DEVLINK\AGENT.BAT`:
 
    ```
    @echo off
-   cd \W98LINK
+   cd \DEVLINK
    :top
-   W98AGENT serve COM1 115200
-   if exist W98AGENT.NEW del W98AGENT.EXE
-   if exist W98AGENT.NEW ren W98AGENT.NEW W98AGENT.EXE
+   DEVLINK serve COM1 115200
+   if exist DEVLINK.NEW del DEVLINK.EXE
+   if exist DEVLINK.NEW ren DEVLINK.NEW DEVLINK.EXE
    goto top
    ```
 
@@ -125,10 +125,10 @@ agent will say so and exit.
 ## 5. Running the agent
 
 ```
-W98AGENT serve [PORT] [BAUD]      defaults: COM1 115200
-W98AGENT --version
-W98AGENT echo [PORT] [BAUD] [IDLE_SECONDS]
-W98AGENT linktest [PORT] [BAUD] [WAIT_SECONDS]
+DEVLINK serve [PORT] [BAUD]      defaults: COM1 115200
+DEVLINK --version
+DEVLINK echo [PORT] [BAUD] [IDLE_SECONDS]
+DEVLINK linktest [PORT] [BAUD] [WAIT_SECONDS]
 ```
 
 `serve` is the agent proper and runs until stopped. `echo` and `linktest` are
@@ -136,7 +136,7 @@ diagnostics (section 9).
 
 **Stopping it.** Ctrl-C stops the agent, and the launcher loop starts it
 again; answer Y at "Terminate batch job" to stop the loop as well, or close
-the window. From the workstation, `w98link exec @stop` stops the agent so the
+the window. From the workstation, `devlink exec @stop` stops the agent so the
 launcher can restart it, which is how an update is applied.
 
 **Console output.** Each line is timestamped: sessions starting, commands
@@ -146,11 +146,11 @@ reports something odd.
 ## 6. Client commands
 
 Every command takes `--line` and `--baud`. `--line` defaults to
-`/dev/ttyUSB0`, or `$W98LINK_LINE` if that is set; `--baud` defaults to
-115200. Setting `W98LINK_LINE` once is the convenient way:
+`/dev/ttyUSB0`, or `$DEVLINK_LINE` if that is set; `--baud` defaults to
+115200. Setting `DEVLINK_LINE` once is the convenient way:
 
 ```sh
-export W98LINK_LINE=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AG0JT9KH-if00-port0
+export DEVLINK_LINE=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AG0JT9KH-if00-port0
 ```
 
 The `by-id` path is worth using: `/dev/ttyUSB0` moves when another USB serial
@@ -159,7 +159,7 @@ device is plugged in first.
 ### exec
 
 ```
-w98link exec [--cwd DIR] [--merge] [--] COMMAND...
+devlink exec [--cwd DIR] [--merge] [--] COMMAND...
 ```
 
 Runs COMMAND on the target through its shell and streams stdout and stderr
@@ -167,10 +167,10 @@ back as they are produced. The words are joined with spaces and parsed by the
 target's shell, so its quoting rules apply, not the client's.
 
 ```sh
-w98link exec ver
-w98link exec dir C:\W98LINK
-w98link exec --cwd C:/SRC wmake all
-w98link exec --merge nmake            # keep errors in step with output
+devlink exec ver
+devlink exec dir C:\DEVLINK
+devlink exec --cwd C:/SRC wmake all
+devlink exec --merge nmake            # keep errors in step with output
 ```
 
 `--` ends the client's own options, which matters when the remote command has
@@ -199,10 +199,10 @@ matters because a command abandoned on the target keeps whatever it had open,
 and on Windows 9x that can be a drive or a file the next transfer needs.
 
 ```
-$ w98link exec 'dir D:\'
+$ devlink exec 'dir D:\'
 ^C
-w98link: cancelling on the target...
-w98link: cancelled; the command was killed on the target
+devlink: cancelling on the target...
+devlink: cancelled; the command was killed on the target
 $ echo $?
 130
 ```
@@ -232,8 +232,8 @@ see section 3.
 disk:
 
 ```
-$ w98link exec '@dir C:\W98AGENT'
-f 135168 1790116008 W98AGENT.EXE
+$ devlink exec '@dir C:\DEVLINK'
+f 135168 1790116008 DEVLINK.EXE
 f 423 1790103092 AGENT.BAT
 ```
 
@@ -251,7 +251,7 @@ client's `time` command rather than this directly.
 handle so nothing is changed:
 
 ```
-$ w98link exec '@caps'
+$ devlink exec '@caps'
 transport serial (win32)
 current 115200 8N1
 subtype RS232
@@ -277,13 +277,13 @@ report; use `@dir` when something on this side has to read it.
 ### time
 
 ```
-w98link time [--line PATH] [--baud N] [--set]
+devlink time [--line PATH] [--baud N] [--set]
 ```
 
 Compares the two clocks, and with `--set` corrects the target's from this one.
 
 ```
-$ w98link time
+$ devlink time
 workstation 2026-09-23 05:39:53 UTC
 target      2026-09-23 06:39:26 UTC
 difference  59 m 33 s ahead
@@ -291,7 +291,7 @@ target tz   UTC-6:00 (Mountain Daylight Time)
 here tz     UTC-5:00 (CDT)
 round trip  105 ms
 
-run 'w98link time --set' to correct it; sync compares file times
+run 'devlink time --set' to correct it; sync compares file times
 ```
 
 That is a real example, and it is the case worth recognising. Nothing was
@@ -332,8 +332,8 @@ applies.
 ### put and get
 
 ```
-w98link put [--force] LOCAL REMOTE
-w98link get REMOTE LOCAL
+devlink put [--force] LOCAL REMOTE
+devlink get REMOTE LOCAL
 ```
 
 Copies one file, compressed, with a CRC-32 over the whole file. The file is
@@ -345,8 +345,8 @@ should be. The modification time travels with the file.
 Options may appear before or after the paths.
 
 ```sh
-w98link put build/app.exe C:/SRC/app.exe --force
-w98link get C:/SRC/output.log ./output.log
+devlink put build/app.exe C:/SRC/app.exe --force
+devlink get C:/SRC/output.log ./output.log
 ```
 
 Remote paths may use `/` or `\`; `/` is usually easier, since a shell on the
@@ -355,7 +355,7 @@ workstation treats `\` as an escape.
 ### sync
 
 ```
-w98link sync [--delete] [--dry-run] [--hidden] LOCALDIR REMOTEDIR
+devlink sync [--delete] [--dry-run] [--hidden] LOCALDIR REMOTEDIR
 ```
 
 Makes REMOTEDIR on the target match LOCALDIR, sending only what differs. This
@@ -379,8 +379,8 @@ sync never deletes anything. `--dry-run` reports what would happen and
 changes nothing.
 
 ```sh
-w98link sync ./src C:/SRC/src
-w98link sync --delete --dry-run ./src C:/SRC/src   # look before leaping
+devlink sync ./src C:/SRC/src
+devlink sync --delete --dry-run ./src C:/SRC/src   # look before leaping
 ```
 
 Sync creates missing directories on the target, including nested ones.
@@ -388,7 +388,7 @@ Sync creates missing directories on the target, including nested ones.
 ### info
 
 ```
-w98link info
+devlink info
 ```
 
 Connects, prints the agent's build version, platform and protocol version,
@@ -404,11 +404,11 @@ Diagnostics; see section 9.
 With the agent running, a compile-and-run cycle is three commands:
 
 ```sh
-export W98LINK_LINE=/dev/serial/by-id/usb-...-if00-port0
+export DEVLINK_LINE=/dev/serial/by-id/usb-...-if00-port0
 
-w98link sync ./src C:/SRC/src        # push what changed
-w98link exec --cwd C:/SRC wmake      # build on the target
-w98link get C:/SRC/app.exe ./app.exe # fetch the result, if you want it
+devlink sync ./src C:/SRC/src        # push what changed
+devlink exec --cwd C:/SRC wmake      # build on the target
+devlink get C:/SRC/app.exe ./app.exe # fetch the result, if you want it
 ```
 
 Put that in a shell function or a Makefile target. A sync of an unchanged
@@ -448,11 +448,11 @@ agent. Both ends must agree.
 Work from the bottom up. Each tool tests one layer, and each needs the agent
 started in the matching mode, so stop `serve` first.
 
-**1. Bytes move at all.** On the target run `W98AGENT echo COM1 115200 120`,
+**1. Bytes move at all.** On the target run `DEVLINK echo COM1 115200 120`,
 then on the workstation:
 
 ```sh
-w98link echo
+devlink echo
 ```
 
 It sends 20 frames and checks each one comes back. All echoed means the
@@ -461,12 +461,12 @@ cable, both ports and the framing are sound. Nothing echoed means the cable
 the wrong port, the wrong speed, or another program holding the port.
 Mismatched or corrupt echoes mean a marginal cable or wrong speed.
 
-**2. The reliable layer.** On the target run `W98AGENT linktest COM1 115200`,
+**2. The reliable layer.** On the target run `DEVLINK linktest COM1 115200`,
 then:
 
 ```sh
-w98link linktest                       # incompressible data: the raw rate
-w98link linktest --file src/core/link.c  # real data: the compressed rate
+devlink linktest                       # incompressible data: the raw rate
+devlink linktest --file src/core/link.c  # real data: the compressed rate
 ```
 
 It reports bytes echoed, corruption, frames sent and resent, CRC errors and
@@ -477,18 +477,18 @@ on both ends will do better than a fast one that keeps failing.
 **3. The protocol.** With `serve` running:
 
 ```sh
-w98link info
+devlink info
 ```
 
 If `echo` works but `info` does not, the problem is above the link: usually a
 client and agent from different builds. The version mismatch shows in the
 agent's console.
 
-**4. A specific operation.** Set `W98LINK_DEBUG=1` to trace a sync's
+**4. A specific operation.** Set `DEVLINK_DEBUG=1` to trace a sync's
 exchange on stderr:
 
 ```sh
-W98LINK_DEBUG=1 w98link sync ./src C:/SRC/src
+DEVLINK_DEBUG=1 devlink sync ./src C:/SRC/src
 ```
 
 **Things that have actually gone wrong here**, and what they looked like:
@@ -523,7 +523,7 @@ media raises DOS's own `Abort, Retry, Fail?` prompt on the target's screen
 and waits there forever:
 
 ```
-$ w98link exec 'dir D:\'          # D: is the CD drive, empty
+$ devlink exec 'dir D:\'          # D: is the CD drive, empty
 General failure reading drive D
 Abort, Retry, Fail?               # no output ever arrives; Ctrl-C the client
 ```
@@ -543,7 +543,7 @@ the error mode, which is why it fails where DOS prompts. It covers the way this
 is normally reached, a command line that names the drive; a program that opens
 empty media by some other route can still do it, so the rest of this advice
 stands. Prefer real programs over builtins:
-use `w98link get`/`put`/`sync` instead of `copy`, and where a listing is
+use `devlink get`/`put`/`sync` instead of `copy`, and where a listing is
 needed, a small program rather than `dir`. `SetErrorMode` at agent startup
 covers the agent's own file operations and any Win32 child, so `get` and
 `put` against an empty drive fail cleanly instead of prompting.
@@ -584,18 +584,18 @@ buffers: the mux's per-channel queues about 536 KB, compression about 300 KB,
 the link's windows and queues 128 KB, and the compression layer's plaintext
 queues 144 KB. Each running command adds up to 72 KB. That is comfortable on
 a machine with 64 MB, and the buffer sizes are compile-time constants in
-`include/w98link/` if a smaller target ever needs them trimmed.
+`include/devlink/` if a smaller target ever needs them trimmed.
 
 ## 11. Maintenance
 
 **Updating the agent**, with the launcher from section 4:
 
 ```sh
-make win98
-w98link put build/bin/W98AGENT.EXE C:/W98LINK/W98AGENT.NEW --force
-w98link exec @stop
+make agent
+devlink put build/bin/DEVLINK.EXE C:/DEVLINK/DEVLINK.NEW --force
+devlink exec @stop
 sleep 7
-w98link info          # confirm the new build version
+devlink info          # confirm the new build version
 ```
 
 The agent exits, the launcher renames the new binary over the old one and

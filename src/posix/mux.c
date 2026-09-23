@@ -4,10 +4,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "w98link/clock.h"
-#include "w98link/mux.h"
-#include "w98link/proto.h"
-#include "w98link/usock.h"
+#include "devlink/clock.h"
+#include "devlink/mux.h"
+#include "devlink/proto.h"
+#include "devlink/usock.h"
 
 #define MUX_CLIENTS 8U
 #define MUX_PAIRS 12U
@@ -456,7 +456,7 @@ int wl_mux_socket_path(const char *line, char *out, size_t cap)
     if (dir == NULL || dir[0] == '\0')
         dir = "/tmp";
     base = base != NULL ? base + 1 : line;
-    n = snprintf(out, cap, "%s/w98link-%s.sock", dir, base);
+    n = snprintf(out, cap, "%s/devlink-%s.sock", dir, base);
     return n > 0 && (size_t)n < cap;
 }
 

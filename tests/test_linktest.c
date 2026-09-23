@@ -8,7 +8,7 @@
 #include <cmocka.h>
 
 #include "pty_pair.h"
-#include "w98link/linktest.h"
+#include "devlink/linktest.h"
 
 /* The real-cable test, end to end over a pty: both programs' loops, the
  * pump, the link and the transport together, as the A21m will run them. */
