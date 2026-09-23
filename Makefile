@@ -163,17 +163,23 @@ $(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) | $(BIN_DIR)
 TEST_SOURCES := $(wildcard $(TEST_DIR)/test_*.c)
 TEST_BINS    := $(patsubst $(TEST_DIR)/test_%.c,$(BIN_DIR)/test_%,$(TEST_SOURCES))
 
-# A test binary is built in one step, so there are no .d files to include and
-# make cannot infer the headers. Listing them matters more here than anywhere
-# else: without them, changing a header leaves every test binary stale, and a
-# test that should now fail keeps passing. That happened while proving the
-# concurrency test discriminates, which is the one job a stale test binary
-# cannot do.
-TEST_DEPS := $(wildcard $(INC_DIR)/devlink/*.h) $(wildcard $(TEST_DIR)/*.h)
+# The library is compiled once and every test links against it. It used to be
+# compiled inside each test binary's own command, which meant 22 sources times
+# 15 tests, 330 compilations, every time a header changed, and again with
+# instrumentation for coverage. The .d files these objects produce also let
+# make rebuild only what a header actually touched.
+TEST_DEPS := $(wildcard $(TEST_DIR)/*.h)
+TEST_OBJ_DIR := $(BUILD_DIR)/testlib
+TEST_LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(TEST_OBJ_DIR)/%.o,$(LIB_SOURCES))
 
-$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(TEST_DEPS) $(ZLIB_LIB) | $(BIN_DIR)
+$(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
-	    -pthread -I$(TEST_DIR) -o $@ $< $(LIB_SOURCES) $(ZLIB_LIB) -lcmocka
+	    -pthread -MMD -MP -c $< -o $@
+
+$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(TEST_LIB_OBJS) $(TEST_DEPS) $(ZLIB_LIB) | $(BIN_DIR)
+	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
+	    -pthread -I$(TEST_DIR) -o $@ $< $(TEST_LIB_OBJS) $(ZLIB_LIB) -lcmocka
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do \
@@ -206,10 +212,17 @@ coverage:
 
 COV_BINS := $(patsubst $(TEST_DIR)/test_%.c,$(BUILD_DIR)/coverage/test_%,$(TEST_SOURCES))
 
-$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(LIB_SOURCES) $(TEST_DEPS) $(ZLIB_LIB)
+COV_OBJ_DIR := $(BUILD_DIR)/covlib
+COV_LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(COV_OBJ_DIR)/%.o,$(LIB_SOURCES))
+
+$(COV_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -pthread -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(COV_LIB_OBJS) $(TEST_DEPS) $(ZLIB_LIB)
 	@mkdir -p $(BUILD_DIR)/coverage
 	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -I$(TEST_DIR) \
-	    -pthread -o $@ $< $(LIB_SOURCES) $(ZLIB_LIB) -lcmocka
+	    -pthread -o $@ $< $(COV_LIB_OBJS) $(ZLIB_LIB) -lcmocka
 
 coverage-run: $(COV_BINS)
 	@for t in $(COV_BINS); do $$t >/dev/null || true; done
@@ -255,13 +268,19 @@ WIN_TIDY_DIRS := /usr/i686-w64-mingw32/include /usr/i686-w64-mingw32/usr/include
                  /usr/local/i686-w64-mingw32/include
 WIN_TIDY_INC  := $(foreach d,$(WIN_TIDY_DIRS),$(if $(wildcard $(d)),-isystem $(d)))
 
+# One clang-tidy per core: it analyses files serially within one invocation,
+# and the analyser is the slowest gate by a wide margin.
+JOBS := $(shell nproc 2>/dev/null || echo 4)
+
 tidy:
-	@clang-tidy $(NATIVE_SOURCES) -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -std=c11
+	@echo $(NATIVE_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -std=c11
 	@if [ -z "$(WIN_TIDY_INC)" ]; then \
 	    echo "== win32: skipped, no mingw-w64 headers found (install them to lint it)"; \
 	else \
 	    echo "== win32"; \
-	    clang-tidy $(AGENT_SOURCES) -- --target=i686-w64-mingw32 $(WIN_TIDY_INC) \
+	    echo $(AGENT_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	        clang-tidy {} -- --target=i686-w64-mingw32 $(WIN_TIDY_INC) \
 	        -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_WIN32_WINNT=0x0500 -DVARIANT=tidy \
 	        -DDEVLINK_VERSION='"0.0.0_tidy"' -std=c11 -Wno-cast-qual; \
 	fi

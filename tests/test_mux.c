@@ -317,6 +317,37 @@ static void test_a_client_arriving_before_the_line_is_up_is_served(void **state)
     assert_memory_equal(cap.out, "early\n", 6);
 }
 
+/*
+ * A client that connects and goes away without saying anything must not take
+ * the multiplexer with it. The autostart probe does exactly this, and it used
+ * to be fatal: the multiplexer wrote its HELLO into the closed socket, took a
+ * SIGPIPE and died, leaving a stale socket for the next attempt to trip over.
+ *
+ * The multiplexer runs in a thread of this process, so if a dead peer can still
+ * raise SIGPIPE, this test dies rather than fails. That is the point: it proves
+ * the library is safe by itself, not that main() remembered to say so.
+ */
+static void test_a_connection_that_closes_at_once_does_not_kill_the_multiplexer(void **state)
+{
+    struct wl_session_cfg cfg = local_session();
+    struct wl_transport probe;
+    struct wl_transport t;
+    struct wl_hello hello;
+
+    (void)state;
+    wait_for_the_line();
+    for (int i = 0; i < 3; i++) {
+        assert_int_equal(wl_unix_connect(h.sock, &probe), WL_OK);
+        wl_transport_close(&probe); /* exactly what the autostart probe does */
+        (void)poll(NULL, 0, 40);    /* long enough for it to be accepted */
+    }
+    /* Still serving. */
+    assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+    assert_int_equal(wl_client_info(&t, &cfg, 5150, 3000, &hello), WL_OK);
+    wl_transport_close(&t);
+    assert_int_equal(hello.proto, WL_PROTO_VERSION);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -328,6 +359,9 @@ int main(void)
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_a_client_arriving_before_the_line_is_up_is_served,
                                         setup_late_agent, teardown),
+        cmocka_unit_test_setup_teardown(
+            test_a_connection_that_closes_at_once_does_not_kill_the_multiplexer, setup,
+            teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

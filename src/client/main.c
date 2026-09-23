@@ -95,7 +95,8 @@ static const char *const help_mux =
     "and exits after --idle seconds (600 by default) with nobody connected.\n"
     "\n"
     "Commands use it only when DEVLINK_MUX=1 is set, and then start it by\n"
-    "themselves if it is not already running. It is off by default because\n"
+    "themselves if it is not already running, logging to <socket>.log rather\n"
+    "than into the terminal that needed it. It is off by default because\n"
     "starting it opens a session of its own, and the agent serves one session:\n"
     "on a line somebody is already using, that kills what they were running.\n"
     "Turn it on deliberately, in the shell you want it in.\n"
@@ -472,8 +473,17 @@ static struct wl_session_cfg local_session(void)
  * Detached deliberately: it has to outlive the command that needed it, since
  * the whole point is that the next command finds it already there.
  */
+/* Where an autostarted multiplexer's log goes, beside its socket. */
+static int mux_log_path(const char *sock, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s.log", sock);
+
+    return n > 0 && (size_t)n < cap;
+}
+
 static int start_mux(const char *line, uint32_t baud, const char *sock)
 {
+    const char *sock_for_log = sock;
     char baud_text[16];
     uint32_t start;
     pid_t pid;
@@ -492,17 +502,28 @@ static int start_mux(const char *line, uint32_t baud, const char *sock)
         char line_copy[256];
         char *const argv[] = {prog, sub, line_opt, line_copy, baud_opt, baud_text, NULL};
         int null_fd = open("/dev/null", O_RDWR);
+        char log_path[288];
+        int log_fd = -1;
 
         (void)snprintf(line_copy, sizeof(line_copy), "%s", line);
+        /* Its log goes to a file, not to the terminal that happened to need
+         * it: a multiplexer started behind a command should not interleave
+         * "client connected" with that command's output. Run it by hand and
+         * its log stays where you can see it. */
+        if (mux_log_path(sock_for_log, log_path, sizeof(log_path)))
+            log_fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0600);
 
         (void)setsid();
         if (null_fd >= 0) {
             (void)dup2(null_fd, 0);
             (void)dup2(null_fd, 1);
-            /* stderr is kept: a multiplexer that cannot start should say so
-             * somewhere, and it is the terminal that asked for it. */
             if (null_fd > 2)
                 (void)close(null_fd);
+        }
+        if (log_fd >= 0) {
+            (void)dup2(log_fd, 2);
+            if (log_fd > 2)
+                (void)close(log_fd);
         }
         (void)execv("/proc/self/exe", argv);
         _exit(127);
