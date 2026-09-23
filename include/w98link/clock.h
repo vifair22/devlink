@@ -1,6 +1,7 @@
 #ifndef W98LINK_CLOCK_H
 #define W98LINK_CLOCK_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "w98link/status.h"
@@ -30,6 +31,18 @@ wl_status wl_clock_utc(uint64_t *secs);
  * included: -300 for US Eastern in winter. Zero if the platform will not say,
  * which is only a display detail. */
 int wl_clock_local_offset_minutes(void);
+
+/*
+ * The name the machine gives its current time zone, daylight included:
+ * "Central Daylight Time" on the target, "CDT" here. An empty string where
+ * the platform has no such notion.
+ *
+ * The offset alone is not enough to spot a misconfigured machine: the A21m
+ * reporting UTC-6 was correct for the zone it had been given (Mountain, with
+ * daylight saving working properly) while being an hour wrong for where it
+ * sits. The name is what makes that visible.
+ */
+void wl_clock_zone_name(char *buf, size_t cap);
 
 /*
  * Sets the wall clock. Fails with WL_ERR_INVAL where it is not supported,

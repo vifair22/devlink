@@ -471,7 +471,8 @@ static int agent_caps(struct agent *a, uint16_t ch, struct exec *e)
  */
 static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec *e)
 {
-    char buf[128];
+    char buf[256];
+    char zone[64];
     uint64_t now = 0;
     size_t n = 0;
     int off;
@@ -511,6 +512,12 @@ static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec
     }
     n += u64_dec((uint64_t)off, buf + n);
     buf[n++] = '\n';
+    wl_clock_zone_name(zone, sizeof(zone));
+    if (zone[0] != '\0') {
+        n += put_lit(buf + n, "zone ");
+        n += put_lit(buf + n, zone);
+        buf[n++] = '\n';
+    }
 
     if (wl_peer_accept(a->peer, ch) != WL_OK)
         return 0;

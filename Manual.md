@@ -284,14 +284,27 @@ Compares the two clocks, and with `--set` corrects the target's from this one.
 
 ```
 $ w98link time
-workstation 2026-09-23 05:20:11 UTC
-target      2026-09-23 05:17:43 UTC
-difference  2 m 28 s behind
-target tz   UTC+0:00
-round trip  47 ms
+workstation 2026-09-23 05:39:53 UTC
+target      2026-09-23 06:39:26 UTC
+difference  59 m 33 s ahead
+target tz   UTC-6:00 (Mountain Daylight Time)
+here tz     UTC-5:00 (CDT)
+round trip  105 ms
 
 run 'w98link time --set' to correct it; sync compares file times
 ```
+
+That is a real example, and it is the case worth recognising. Nothing was
+drifting: the A21m had been given the Mountain zone, was applying daylight
+saving correctly for it, and showed the right time on its taskbar because its
+clock had been set to Central wall time. The two errors cancelled on screen and
+did not cancel in UTC, so every file it wrote was stamped an hour into the
+future. Both zone names are printed when they differ, because a wrong zone
+reads perfectly plausibly on its own.
+
+Fixing a zone is a two-step job, in this order: change the zone on the target
+first, which leaves its UTC alone and so moves its displayed time, then run
+`--set`, which corrects UTC and brings the display back.
 
 **Why this matters more than it looks.** `sync` decides what to send by
 comparing modification times, so a target whose clock is wrong either resends a

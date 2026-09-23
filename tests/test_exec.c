@@ -569,6 +569,14 @@ static void test_agent_time_reports_the_clock(void **state)
     assert_non_null(at);
     assert_non_null(strstr(cap.out, "localoffset "));
     secs = strtoll(at + 4, NULL, 10);
+    {
+        /* The zone name is what tells a misconfigured machine from a drifting
+         * one, so it has to be there and it has to say something. */
+        const char *zone = strstr(cap.out, "zone ");
+
+        assert_non_null(zone);
+        assert_true(zone[5] != '\n' && zone[5] != '\0');
+    }
     assert_int_equal(wl_clock_utc(&here), WL_OK);
     /* The agent is this process, so the two clocks are the same one. */
     assert_true(secs >= (long long)here - 5 && secs <= (long long)here + 5);

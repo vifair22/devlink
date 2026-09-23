@@ -736,6 +736,24 @@ static int reply_number(const struct reply *r, const char *name, long long *out)
     return 1;
 }
 
+/* Reads "name <rest of the line>" out of the agent's reply. */
+static int reply_text(const struct reply *r, const char *name, char *out, size_t cap)
+{
+    const char *at = strstr(r->text, name);
+    size_t n = 0;
+
+    if (at == NULL)
+        return 0;
+    at += strlen(name);
+    while (*at == ' ')
+        at++;
+    while (at[n] != '\0' && at[n] != '\n' && n + 1 < cap)
+        n++;
+    memcpy(out, at, n);
+    out[n] = '\0';
+    return n > 0;
+}
+
 /* Asks the agent one @ command and hands back what it said. */
 static int ask_agent(struct wl_transport *t, const struct wl_session_cfg *cfg,
                      const char *cmd, struct reply *out)
@@ -803,6 +821,7 @@ static int cmd_time(int argc, char **argv)
     uint64_t here = 0;
     long long there = 0;
     long long offset = 0;
+    char zone[64] = "";
     uint32_t rtt;
 
     if (parse_all_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
@@ -843,12 +862,27 @@ static int cmd_time(int argc, char **argv)
         return 1;
     }
     (void)reply_number(&reply, "localoffset", &offset);
+    (void)reply_text(&reply, "zone", zone, sizeof(zone));
 
     print_gmtime("workstation", (long long)here);
     print_gmtime("target", there);
     print_difference(there - (long long)here);
-    printf("target tz   UTC%+lld:%02lld\n", offset / 60,
-           (offset < 0 ? -offset : offset) % 60);
+    printf("target tz   UTC%+lld:%02lld", offset / 60, (offset < 0 ? -offset : offset) % 60);
+    if (zone[0] != '\0')
+        printf(" (%s)", zone);
+    printf("\n");
+    {
+        char mine[64] = "";
+
+        /* Both names, when they differ, because a zone that is wrong for
+         * where the machine sits reads perfectly plausibly on its own. */
+        wl_clock_zone_name(mine, sizeof(mine));
+        if (mine[0] != '\0' && zone[0] != '\0' && offset != wl_clock_local_offset_minutes())
+            printf("here tz     UTC%+d:%02d (%s)\n", wl_clock_local_offset_minutes() / 60,
+                   (wl_clock_local_offset_minutes() < 0 ? -wl_clock_local_offset_minutes()
+                                                        : wl_clock_local_offset_minutes()) % 60,
+                   mine);
+    }
     printf("round trip  %u ms\n", (unsigned)rtt);
     if (!set && (there - (long long)here > 2 || (long long)here - there > 2))
         printf("\nrun 'w98link time --set' to correct it; sync compares file times\n");

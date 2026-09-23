@@ -30,6 +30,18 @@ int wl_clock_local_offset_minutes(void)
     return (int)(local.tm_gmtoff / 60);
 }
 
+void wl_clock_zone_name(char *buf, size_t cap)
+{
+    time_t now = time(NULL);
+    struct tm local;
+
+    buf[0] = '\0';
+    if (localtime_r(&now, &local) == NULL)
+        return;
+    if (strftime(buf, cap, "%Z", &local) == 0)
+        buf[0] = '\0';
+}
+
 wl_status wl_clock_set_utc(uint64_t secs)
 {
     /*

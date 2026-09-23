@@ -35,6 +35,23 @@ int wl_clock_local_offset_minutes(void)
     return -(int)(tz.Bias + tz.StandardBias);
 }
 
+void wl_clock_zone_name(char *buf, size_t cap)
+{
+    TIME_ZONE_INFORMATION tz;
+    DWORD id = GetTimeZoneInformation(&tz);
+    const WCHAR *name;
+
+    buf[0] = '\0';
+    if (id == TIME_ZONE_ID_INVALID)
+        return;
+    name = id == TIME_ZONE_ID_DAYLIGHT ? tz.DaylightName : tz.StandardName;
+    /* The only wide string in the agent, and it comes from the API rather
+     * than from us; a zone name is ASCII in practice, and a lone conversion
+     * is better than reporting nothing. */
+    if (WideCharToMultiByte(CP_ACP, 0, name, -1, buf, (int)cap, NULL, NULL) == 0)
+        buf[0] = '\0';
+}
+
 /*
  * On NT the privilege to set the clock is held by administrators but disabled
  * in the token until asked for, so SetSystemTime fails with ERROR_PRIVILEGE_
