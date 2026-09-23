@@ -118,10 +118,6 @@ struct app {
     uint32_t drawn_notes;
     int drawn_state;
     unsigned long drawn_seconds;
-    /* The log's top line as this window last set it. Anything else means the
-     * reader scrolled, and the pane stops following the tail until they come
-     * back to it. */
-    LRESULT log_top;
 };
 
 static struct app app;
@@ -509,7 +505,6 @@ static void clear_log(void)
 {
     (void)SendMessageA(app.log, LB_RESETCONTENT, 0, 0);
     (void)SendMessageA(app.log, LB_SETHORIZONTALEXTENT, 0, 0);
-    app.log_top = 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -692,6 +687,36 @@ static void create_children(void)
         (void)SendMessageA(app.log, LB_SETHORIZONTALEXTENT, 0, 0);
 }
 
+/* Whether the newest line is on screen, which is what decides whether the
+ * pane follows the tail. Asking the control where its last item sits is the
+ * only answer that survives a reader scrolling away and back again: a
+ * remembered top index goes stale the moment lines arrive while they are
+ * reading, so comparing against one meant following never resumed. */
+static int log_at_end(void)
+{
+    LRESULT count = SendMessageA(app.log, LB_GETCOUNT, 0, 0);
+    RECT item;
+    RECT pane;
+
+    if (count <= 0)
+        return 1;
+    if (SendMessageA(app.log, LB_GETITEMRECT, (WPARAM)(count - 1), (LPARAM)&item) == LB_ERR)
+        return 1;
+    if (!GetClientRect(app.log, &pane))
+        return 1;
+    return item.top < pane.bottom;
+}
+
+/* Brings the newest line back on screen. The control clamps this to the last
+ * whole page by itself, so the index asked for need not be the one it takes. */
+static void log_to_end(void)
+{
+    LRESULT count = SendMessageA(app.log, LB_GETCOUNT, 0, 0);
+
+    if (count > 0)
+        (void)SendMessageA(app.log, LB_SETTOPINDEX, (WPARAM)(count - 1), 0);
+}
+
 static void layout(void)
 {
     RECT rc;
@@ -731,7 +756,16 @@ static void layout(void)
             slack = 120;
         (void)SendMessageA(app.list, LVM_SETCOLUMNWIDTH, 1, (LPARAM)slack);
     }
-    (void)MoveWindow(app.log, pad, top + rest - log_h, rc.right - (2 * pad), log_h, TRUE);
+    {
+        /* Measured before the pane changes size: growing or shrinking it moves
+         * the last whole page, so a view that was on the tail has to be put
+         * back on it afterwards. */
+        int tail = log_at_end();
+
+        (void)MoveWindow(app.log, pad, top + rest - log_h, rc.right - (2 * pad), log_h, TRUE);
+        if (tail)
+            log_to_end();
+    }
 }
 
 static void set_part(int part, const char *text)
@@ -780,8 +814,6 @@ static void refresh_log(void)
     unsigned held;
     unsigned fresh;
     LRESULT count;
-    LRESULT was_at;
-    LRESULT lost = 0;
     int follow;
 
     wl_monitor_totals(app.mon, &tot);
@@ -793,8 +825,7 @@ static void refresh_log(void)
      * still, and scrolling to the bottom again resumes. Using the selection
      * for this instead would mean a reader who clicked a line once never saw
      * the log move again. */
-    was_at = SendMessageA(app.log, LB_GETTOPINDEX, 0, 0);
-    follow = was_at == app.log_top;
+    follow = log_at_end();
 
     held = wl_monitor_log_lines(app.mon);
     fresh = tot.notes - app.drawn_notes > held ? held : (unsigned)(tot.notes - app.drawn_notes);
@@ -811,17 +842,9 @@ static void refresh_log(void)
     while (count > (LRESULT)WL_MON_LOG_LINES) {
         (void)SendMessageA(app.log, LB_DELETESTRING, 0, 0);
         count--;
-        lost++;
     }
-    if (follow && count > 0) {
-        /* Read back rather than assumed: the control clamps this to the last
-         * whole page, so what it settles on is what counts as "at the end". */
-        (void)SendMessageA(app.log, LB_SETTOPINDEX, (WPARAM)(count - 1), 0);
-        app.log_top = SendMessageA(app.log, LB_GETTOPINDEX, 0, 0);
-    } else if (lost > 0) {
-        /* Lines went from the top, so the held view slid up with them. */
-        app.log_top = was_at > lost ? was_at - lost : 0;
-    }
+    if (follow)
+        log_to_end();
 }
 
 static void refresh(void)
@@ -1092,22 +1115,27 @@ static void parse_args(const char *cmd)
     }
 }
 
-int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+/* The parameters carry the SDK's own names rather than this file's shorter
+ * style: an entry point is declared in the platform headers, and a lint
+ * that compares a definition against its declaration reports every name
+ * that differs from the one the header chose. */
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine,
+                   int nShowCmd)
 {
     WNDCLASSEXA cls;
     MSG msg;
     char title[128];
     char where[64];
 
-    (void)prev;
+    (void)hPrevInstance;
     /* Same reason as the console agent: a drive with no media must fail
      * rather than raise a prompt nobody is sitting in front of
      * (docs/bug-critical-error-hang.md). Children inherit the mode. */
     (void)SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
     InitCommonControls();
 
-    app.inst = inst;
-    parse_args(cmd);
+    app.inst = hInstance;
+    parse_args(lpCmdLine);
     /* Taken before anything is renamed, so they still name this program when
      * it is time to step aside. */
     if (GetModuleFileNameA(NULL, app.exe, sizeof(app.exe)) > 0) {
@@ -1126,9 +1154,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     memset(&cls, 0, sizeof(cls));
     cls.cbSize = sizeof(cls);
     cls.lpfnWndProc = proc;
-    cls.hInstance = inst;
+    cls.hInstance = hInstance;
     cls.hCursor = LoadCursor(NULL, IDC_ARROW);
-    app.icon = LoadIconA(inst, MAKEINTRESOURCEA(IDI_DEVLINK));
+    app.icon = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_DEVLINK));
     if (app.icon == NULL)
         app.icon = LoadIcon(NULL, IDI_APPLICATION);
     cls.hIcon = app.icon;
@@ -1142,7 +1170,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     }
     (void)snprintf(title, sizeof(title), "devlink agent %s", wl_version());
     if (CreateWindowExA(0, cls.lpszClassName, title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                        CW_USEDEFAULT, 720, 480, NULL, NULL, inst, NULL)
+                        CW_USEDEFAULT, 720, 480, NULL, NULL, hInstance, NULL)
         == NULL) {
         (void)MessageBoxA(NULL, "Cannot create the window.", "devlink", MB_ICONERROR | MB_OK);
         return 1;
@@ -1153,7 +1181,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     if (app.start_tray) {
         go_to_tray();
     } else {
-        (void)ShowWindow(app.wnd, show);
+        (void)ShowWindow(app.wnd, nShowCmd);
         (void)UpdateWindow(app.wnd);
     }
     start_serving();

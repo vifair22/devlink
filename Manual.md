@@ -169,8 +169,11 @@ The window is in three parts:
   commands, four transfers and a sync at once, and a scrolling log can only
   report what has already happened.
 - **The log**, the same timestamped lines the console prints, with about 500
-  lines of scrollback. It follows the newest line unless you select one, which
-  is taken to mean you are reading rather than watching.
+  lines of scrollback. It scrolls itself to the newest line while the newest
+  line is on screen. Scrolling back holds the view still, so a line can be read
+  while work continues, and scrolling to the bottom again resumes following.
+  Selecting a line does not stop it: a reader who clicks one still wants to
+  watch.
 - **The status bar**: who is connected, the port and rate, and the totals for
   this run.
 
