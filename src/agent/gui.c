@@ -72,7 +72,7 @@
 /* Three columns hold a known shape of text; the fourth is the command line or
  * the path, so it takes whatever width is left. */
 #define COL_WHAT 90
-#define COL_PROGRESS 150
+#define COL_PROGRESS 170
 #define COL_ELAPSED 70
 
 struct app {
@@ -281,10 +281,14 @@ static void row_text(const struct wl_mon_row *r, int col, char *out, size_t cap)
         break;
     case 2:
         human(r->done, a, sizeof(a));
-        if (r->total == 0) {
-            /* A command has no size to work towards; what its count means is
-             * worth saying, since the column next to it is a percentage. */
-            (void)snprintf(out, cap, "%s%s", a, r->kind == WL_KIND_EXEC ? " out" : "");
+        if (r->kind == WL_KIND_EXEC) {
+            /* A command has no size to work towards, so there is no percentage
+             * to reach. What it has sent back is worth showing, but it is not
+             * progress: a command that prints nothing sits at zero for its
+             * whole run, and a bare "0 B" there reads like a stall. */
+            (void)snprintf(out, cap, "Running (%s out)", a);
+        } else if (r->total == 0) {
+            (void)snprintf(out, cap, "%s", a);
         } else {
             human(r->total, b, sizeof(b));
             (void)snprintf(out, cap, "%s of %s (%lu%%)", a, b,
