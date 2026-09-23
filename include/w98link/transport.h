@@ -23,6 +23,13 @@ struct wl_transport_ops {
     /* Writes all len bytes or fails. */
     wl_status (*write)(void *impl, const uint8_t *buf, size_t len);
     void (*close)(void *impl);
+    /*
+     * Optional. Describes what the underlying port can do, one "name value"
+     * per line, for a person deciding whether to change how it is driven: a
+     * serial driver's settable rates and buffer sizes, later a socket's peer.
+     * NULL when there is nothing to report, which the caller must expect.
+     */
+    wl_status (*caps)(void *impl, char *out, size_t cap);
 };
 
 struct wl_transport {
@@ -49,6 +56,15 @@ static inline void wl_transport_close(struct wl_transport *t)
         t->ops->close(t->impl);
     t->ops = NULL;
     t->impl = NULL;
+}
+
+/* Writes the transport's own description of the port into out. Fails with
+ * WL_ERR_INVAL when this transport has nothing to say. */
+static inline wl_status wl_transport_caps(struct wl_transport *t, char *out, size_t cap)
+{
+    if (t->ops == NULL || t->ops->caps == NULL)
+        return wl_fail(WL_ERR_INVAL, "this transport reports no capabilities");
+    return t->ops->caps(t->impl, out, cap);
 }
 
 /* Opens a serial port at baud, 8N1, no flow control. Implemented per

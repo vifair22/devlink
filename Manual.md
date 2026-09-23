@@ -244,6 +244,27 @@ side; split the line three times and stop. Entries are in directory order, not
 sorted, and `.` and `..` are left out. A path that cannot be listed fails with
 status 125 and a message rather than printing nothing.
 
+`@caps` reports what the serial port underneath can do, asked of the open
+handle so nothing is changed:
+
+```
+$ w98link exec '@caps'
+transport serial (win32)
+current 115200 8N1
+subtype RS232
+buffers rx 16384 tx 0
+maxbaud any (BAUD_USER)
+settable 75 110 ... 57600 115200 any (BAUD_USER)
+```
+
+Ask this before changing how the line is driven. A settable list that stops at
+115200 with `any (BAUD_USER)` after it, which is what the A21m reports, means
+the driver will not promise a ceiling and will only answer for a specific rate
+when asked. On that machine the answer is arithmetic: a 16550A clocked at
+1.8432 MHz divides to exactly 115200 at a divisor of 1, and 1 is the smallest
+divisor there is, so 115200 is the ceiling. Faster rates need a Super I/O
+high-speed mode that the stock driver does not enable.
+
 Compared with `dir` on the same directory: long names instead of 8.3 aliases,
 exact byte sizes, a machine-readable time instead of a locale-formatted one, a
 real exit status, no volume header or free-space footer, and about half the

@@ -113,6 +113,7 @@ struct sync {
 
 struct agent {
     const struct wl_agent_cfg *cfg;
+    struct wl_transport *t; /* kept for @caps, which asks the port about itself */
     struct wl_peer *peer;
     uint32_t reported_gen; /* session whose stream error was already logged */
     struct exec execs[WL_AGENT_MAX_EXEC];
@@ -394,11 +395,45 @@ static int agent_dir(struct agent *a, uint16_t ch, const char *path, struct exec
 }
 
 /*
+ * What the port underneath says about itself, so a decision to drive it faster
+ * rests on the driver's answer rather than a guess about the hardware. Served
+ * through the same buffer path as @dir.
+ *
+ * Returns nonzero if the slot is now serving the answer.
+ */
+static int agent_caps(struct agent *a, uint16_t ch, struct exec *e)
+{
+    char buf[1024];
+    wl_status st = wl_transport_caps(a->t, buf, sizeof(buf));
+    size_t n;
+
+    if (st != WL_OK) {
+        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, wl_error());
+        return 0;
+    }
+    n = strlen(buf);
+    if (wl_peer_accept(a->peer, ch) != WL_OK)
+        return 0;
+    e->out_buf = malloc(n);
+    if (e->out_buf == NULL) {
+        (void)wl_peer_close(a->peer, ch);
+        return 0;
+    }
+    memcpy(e->out_buf, buf, n);
+    e->out_len = n;
+    e->active = 1;
+    e->ch = ch;
+    log_line(a, "caps: reported", "");
+    return 1;
+}
+
+/*
  * Commands beginning with '@' address the agent itself rather than the shell
  * (docs/protocol.md, "EXEC"). @stop exists so the agent can be replaced: the
  * launcher copies a new binary in and starts it again. @dir lists a directory
  * without going near command.com, which is what makes it report long names,
- * exact sizes and a real exit status.
+ * exact sizes and a real exit status. @caps reports what the port it is
+ * serving on can be set to.
  *
  * Returns nonzero if the exec slot is now in use.
  */
@@ -413,6 +448,8 @@ static int agent_command(struct agent *a, uint16_t ch, const char *cmd, struct e
             path++;
         return agent_dir(a, ch, path, e);
     }
+    if (strcmp(cmd, "@caps") == 0)
+        return agent_caps(a, ch, e);
     if (strcmp(cmd, "@stop") != 0) {
         (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "unknown agent command");
         return 0;
@@ -1418,6 +1455,7 @@ wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
     if (a == NULL)
         return wl_fail(WL_ERR_NOMEM, "agent: out of memory");
     a->cfg = cfg;
+    a->t = t;
     memset(&h, 0, sizeof(h));
     h.ctx = a;
     h.session = on_session;

@@ -311,6 +311,12 @@ Unknown `@` commands are refused with OPEN_FAIL. v1 has two:
   `..` are left out. A path that cannot be listed is refused with OPEN_FAIL
   and code 256 rather than producing an empty listing.
 
+- `@caps` reports what the port the agent is serving on can be set to, as
+  STDOUT records then EXIT 0, one `name value` per line: the current settings,
+  the driver's maximum and settable rates, its buffer sizes. It asks the open
+  handle, so nothing changes. Refused with OPEN_FAIL and code 3 on a transport
+  with nothing to report.
+
   This exists because the alternative on the target is `command.com`'s `dir`,
   which reports 8.3 aliases instead of long names, formats dates by the
   machine's locale, cannot return a real status, and costs a DOS virtual

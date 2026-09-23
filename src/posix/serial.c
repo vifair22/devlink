@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
@@ -69,7 +70,30 @@ static void fd_close(void *impl)
     free(s);
 }
 
-static const struct wl_transport_ops fd_ops = {fd_read, fd_write, fd_close};
+/* The kernel will set whatever rate the hardware supports, so the useful
+ * fact here is what the port is running at now; the FTDI at this end goes far
+ * beyond anything the other end will agree to. */
+static wl_status fd_caps(void *impl, char *out, size_t cap)
+{
+    struct fd_impl *s = impl;
+    struct termios tio;
+    speed_t sp;
+    int n;
+
+    if (tcgetattr(s->fd, &tio) != 0)
+        return wl_fail(WL_ERR_IO, "caps: not a terminal: %s", strerror(errno));
+    sp = cfgetospeed(&tio);
+    n = snprintf(out, cap,
+                 "transport serial (posix)\n"
+                 "current %lu\n"
+                 "settable any rate the kernel and the hardware agree on\n",
+                 (unsigned long)sp);
+    if (n < 0 || (size_t)n >= cap)
+        return wl_fail(WL_ERR_NOSPACE, "caps: buffer too small");
+    return WL_OK;
+}
+
+static const struct wl_transport_ops fd_ops = {fd_read, fd_write, fd_close, fd_caps};
 
 wl_status wl_fd_transport(int fd, struct wl_transport *out)
 {

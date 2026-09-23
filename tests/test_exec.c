@@ -489,6 +489,23 @@ static void test_agent_dir_failures(void **state)
     assert_string_equal(r.message, "drive D: is not ready");
 }
 
+/* @caps asks the port about itself. Over a pty that is the POSIX serial
+ * backend, which reports the rate the port is actually running at; on the
+ * target it is the Windows driver's own list of rates it will accept, which is
+ * the thing worth knowing before changing how the line is driven. */
+static void test_agent_caps_reports_the_port(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    assert_int_equal(run("@caps", NULL, 0, &r), WL_OK);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+    cap.out[cap.out_len] = '\0';
+    assert_non_null(strstr(cap.out, "transport serial"));
+    assert_non_null(strstr(cap.out, "current 115200\n"));
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -514,6 +531,7 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_agent_dir_handles_a_big_directory, setup,
                                         teardown),
         cmocka_unit_test_setup_teardown(test_agent_dir_failures, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_agent_caps_reports_the_port, setup, teardown),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -79,7 +79,76 @@ static void com_close(void *impl)
     free(c);
 }
 
-static const struct wl_transport_ops com_ops = {com_read, com_write, com_close};
+/*
+ * What the driver says it can do, asked of the open port so nothing has to be
+ * changed to find out. This is the question worth answering before raising the
+ * line rate: a plain 16550A clocked at 1.8432 MHz divides down to 115200 at
+ * best (a divisor of 1), so anything faster needs a Super I/O high-speed mode
+ * that the stock driver does not enable. dwSettableBaud is the driver's own
+ * answer rather than an assumption about the chip.
+ */
+static const struct {
+    DWORD flag;
+    const char *name;
+} baud_flags[] = {
+    {BAUD_075, "75"},         {BAUD_110, "110"},       {BAUD_134_5, "134.5"},
+    {BAUD_150, "150"},        {BAUD_300, "300"},       {BAUD_600, "600"},
+    {BAUD_1200, "1200"},      {BAUD_1800, "1800"},     {BAUD_2400, "2400"},
+    {BAUD_4800, "4800"},      {BAUD_7200, "7200"},     {BAUD_9600, "9600"},
+    {BAUD_14400, "14400"},    {BAUD_19200, "19200"},   {BAUD_38400, "38400"},
+    {BAUD_56K, "56000"},      {BAUD_57600, "57600"},   {BAUD_115200, "115200"},
+    {BAUD_128K, "128000"},    {BAUD_USER, "any (BAUD_USER)"}
+};
+
+static size_t add_rates(char *buf, size_t at, size_t cap, const char *label, DWORD mask)
+{
+    at += (size_t)snprintf(buf + at, cap - at, "%s", label);
+    for (size_t i = 0; i < sizeof(baud_flags) / sizeof(baud_flags[0]) && at < cap; i++) {
+        if ((mask & baud_flags[i].flag) != 0)
+            at += (size_t)snprintf(buf + at, cap - at, " %s", baud_flags[i].name);
+    }
+    if (at < cap)
+        at += (size_t)snprintf(buf + at, cap - at, "\n");
+    return at;
+}
+
+static wl_status com_caps(void *impl, char *out, size_t cap)
+{
+    struct com_impl *c = impl;
+    char buf[1024];
+    COMMPROP pr;
+    DCB dcb;
+    size_t at = 0;
+    size_t n;
+
+    memset(&pr, 0, sizeof(pr));
+    pr.wPacketLength = sizeof(pr);
+    if (!GetCommProperties(c->h, &pr))
+        return wl_fail(WL_ERR_IO, "caps: GetCommProperties failed (%lu)", GetLastError());
+    at += (size_t)snprintf(buf + at, sizeof(buf) - at, "transport serial (win32)\n");
+    memset(&dcb, 0, sizeof(dcb));
+    dcb.DCBlength = sizeof(dcb);
+    if (GetCommState(c->h, &dcb))
+        at += (size_t)snprintf(buf + at, sizeof(buf) - at, "current %lu %u%c%u\n",
+                               dcb.BaudRate, (unsigned)dcb.ByteSize,
+                               dcb.Parity == NOPARITY ? 'N' : 'P',
+                               dcb.StopBits == ONESTOPBIT ? 1U : 2U);
+    at += (size_t)snprintf(buf + at, sizeof(buf) - at, "subtype %s\n",
+                           (pr.dwProvSubType & 0xFFU) == PST_RS232 ? "RS232" : "other");
+    at += (size_t)snprintf(buf + at, sizeof(buf) - at, "buffers rx %lu tx %lu\n",
+                           pr.dwCurrentRxQueue, pr.dwCurrentTxQueue);
+    at = add_rates(buf, at, sizeof(buf), "maxbaud", pr.dwMaxBaud);
+    at = add_rates(buf, at, sizeof(buf), "settable", pr.dwSettableBaud);
+    if (at >= sizeof(buf))
+        return wl_fail(WL_ERR_NOSPACE, "caps: description did not fit");
+    n = strlen(buf);
+    if (n + 1 > cap)
+        return wl_fail(WL_ERR_NOSPACE, "caps: buffer too small");
+    memcpy(out, buf, n + 1);
+    return WL_OK;
+}
+
+static const struct wl_transport_ops com_ops = {com_read, com_write, com_close, com_caps};
 
 wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *out)
 {
