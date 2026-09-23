@@ -148,7 +148,10 @@ static wl_status com_caps(void *impl, char *out, size_t cap)
     return WL_OK;
 }
 
-static const struct wl_transport_ops com_ops = {com_read, com_write, com_close, com_caps};
+/* No descriptor to wait on: Win32 has no poll, and the agent has only ever one
+ * transport, so nothing needs it. */
+static const struct wl_transport_ops com_ops = {com_read, com_write, com_close, com_caps,
+                                                NULL};
 
 wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *out)
 {

@@ -30,6 +30,13 @@ struct wl_transport_ops {
      * NULL when there is nothing to report, which the caller must expect.
      */
     wl_status (*caps)(void *impl, char *out, size_t cap);
+    /*
+     * Optional. The descriptor to wait on, for a caller that must watch
+     * several transports at once (the local multiplexer watches the line and
+     * every connected client). -1, or absent, means this transport cannot be
+     * waited on that way and has to be polled through read().
+     */
+    int (*fd)(void *impl);
 };
 
 struct wl_transport {
@@ -56,6 +63,14 @@ static inline void wl_transport_close(struct wl_transport *t)
         t->ops->close(t->impl);
     t->ops = NULL;
     t->impl = NULL;
+}
+
+/* A descriptor to wait on, or -1 if this transport does not offer one. */
+static inline int wl_transport_fd(struct wl_transport *t)
+{
+    if (t->ops == NULL || t->ops->fd == NULL)
+        return -1;
+    return t->ops->fd(t->impl);
 }
 
 /* Writes the transport's own description of the port into out. Fails with

@@ -58,6 +58,14 @@ struct wl_peer *wl_peer_new(const struct wl_session_cfg *cfg, uint32_t seed, uin
                             const struct wl_peer_handlers *handlers);
 void wl_peer_free(struct wl_peer *p);
 
+/*
+ * Presents somebody else's identity in our HELLO. Only the local multiplexer
+ * uses it: a client connecting to it must see the agent across the line, not
+ * the relay in between. Must be called before the first work or pump, because
+ * HELLO goes out with the first of those.
+ */
+void wl_peer_set_identity(struct wl_peer *p, uint8_t platform, const char *build);
+
 struct wl_session *wl_peer_session(struct wl_peer *p);
 
 /* Runs the mux over whatever the session has: parses and dispatches

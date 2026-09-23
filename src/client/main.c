@@ -1,8 +1,11 @@
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -11,6 +14,8 @@
 #include "w98link/file_ops.h"
 #include "w98link/echo.h"
 #include "w98link/linktest.h"
+#include "w98link/mux.h"
+#include "w98link/usock.h"
 #include "w98link/proto.h"
 #include "w98link/sync.h"
 #include "w98link/transport.h"
@@ -33,6 +38,7 @@ static const char *const help_main =
     "  sync      copy a directory to the agent, sending only what differs\n"
     "  info      show the agent's version and platform\n"
     "  time      compare the agent's clock with this one, or set it\n"
+    "  mux       the multiplexer that lets several commands share the line\n"
     "  echo      test the cable and ports against 'W98AGENT echo'\n"
     "  linktest  measure the reliable link against 'W98AGENT linktest'\n"
     "\n"
@@ -77,6 +83,25 @@ static const char *const help_info =
     "\n"
     "Connects to the agent, prints what it reports about itself, and\n"
     "disconnects.\n";
+
+static const char *const help_mux =
+    "usage: w98link mux [--line PATH] [--baud N] [--idle SECONDS]\n"
+    "       w98link mux --stop [--line PATH]\n"
+    "\n"
+    "Runs the multiplexer: one process owns the line and keeps a single\n"
+    "session to the agent, and every other command reaches the agent through\n"
+    "it. That is what lets a second terminal run something without killing\n"
+    "what is already running, so it starts by itself when a command needs it\n"
+    "and exits after --idle seconds (600 by default) with nobody connected.\n"
+    "\n"
+    "Commands use it only when W98LINK_MUX=1 is set, and then start it by\n"
+    "themselves if it is not already running. It is off by default because\n"
+    "starting it opens a session of its own, and the agent serves one session:\n"
+    "on a line somebody is already using, that kills what they were running.\n"
+    "Turn it on deliberately, in the shell you want it in.\n"
+    "\n"
+    "'echo' and 'linktest' always take the port directly whatever this says,\n"
+    "since they test the cable rather than talk to the agent.\n";
 
 static const char *const help_time =
     "usage: w98link time [--line PATH] [--baud N] [--set]\n"
@@ -430,6 +455,114 @@ static struct wl_session_cfg serial_session(uint32_t baud)
     return cfg;
 }
 
+/* A session that never leaves the machine: nothing to pace, and compressing
+ * for a Unix socket would spend effort to save nothing. */
+static struct wl_session_cfg local_session(void)
+{
+    struct wl_session_cfg cfg;
+
+    wl_session_cfg_init(&cfg);
+    cfg.link.bytes_per_sec = 0;
+    cfg.level = 0;
+    return cfg;
+}
+
+/*
+ * Starts the multiplexer for this line and waits for its socket to answer.
+ * Detached deliberately: it has to outlive the command that needed it, since
+ * the whole point is that the next command finds it already there.
+ */
+static int start_mux(const char *line, uint32_t baud, const char *sock)
+{
+    char baud_text[16];
+    uint32_t start;
+    pid_t pid;
+
+    (void)snprintf(baud_text, sizeof(baud_text), "%lu", (unsigned long)baud);
+    pid = fork();
+    if (pid < 0)
+        return 0;
+    if (pid == 0) {
+        /* execv's signature predates const, so the strings are copied into
+         * writable storage rather than cast about. */
+        char prog[] = "w98link";
+        char sub[] = "mux";
+        char line_opt[] = "--line";
+        char baud_opt[] = "--baud";
+        char line_copy[256];
+        char *const argv[] = {prog, sub, line_opt, line_copy, baud_opt, baud_text, NULL};
+        int null_fd = open("/dev/null", O_RDWR);
+
+        (void)snprintf(line_copy, sizeof(line_copy), "%s", line);
+
+        (void)setsid();
+        if (null_fd >= 0) {
+            (void)dup2(null_fd, 0);
+            (void)dup2(null_fd, 1);
+            /* stderr is kept: a multiplexer that cannot start should say so
+             * somewhere, and it is the terminal that asked for it. */
+            if (null_fd > 2)
+                (void)close(null_fd);
+        }
+        (void)execv("/proc/self/exe", argv);
+        _exit(127);
+    }
+    /* It has a port to open and a handshake to do; a second is generous. */
+    start = wl_clock_ms();
+    while (wl_clock_since(start) < 2000U) {
+        struct wl_transport probe;
+
+        if (wl_unix_connect(sock, &probe) == WL_OK) {
+            wl_transport_close(&probe);
+            return 1;
+        }
+        (void)poll(NULL, 0, 25);
+    }
+    return 0;
+}
+
+/*
+ * Opens the line for one command: directly, or through the multiplexer when
+ * asked for with W98LINK_MUX=1.
+ *
+ * Opt-in on purpose, and the reason is worth keeping. Routing through a
+ * multiplexer changes what a command does to a line that somebody may already
+ * be using: the multiplexer opens a session of its own, and the agent serves
+ * one session, so starting one displaces whatever session is there and kills
+ * its commands. That is the very thing it exists to prevent, and it happened
+ * to a real transfer the first time this defaulted to on, because rebuilding
+ * the binary changed how an already-running workflow reached the agent.
+ *
+ * A build that changes behaviour under a running workflow is a trap, however
+ * good the behaviour. Turn it on deliberately, once, per shell.
+ */
+static wl_status open_line(const char *line, uint32_t baud, struct wl_session_cfg *cfg,
+                           struct wl_transport *t)
+{
+    const char *want = getenv("W98LINK_MUX");
+    char sock[256];
+
+    if (strncmp(line, "unix:", 5) == 0) {
+        *cfg = local_session();
+        return wl_unix_connect(line + 5, t);
+    }
+    if (want == NULL || want[0] == '0' || want[0] == '\0' ||
+        !wl_mux_socket_path(line, sock, sizeof(sock))) {
+        *cfg = serial_session(baud);
+        return wl_serial_open(line, baud, t);
+    }
+    *cfg = local_session();
+    if (wl_unix_connect(sock, t) == WL_OK)
+        return WL_OK;
+    if (start_mux(line, baud, sock) && wl_unix_connect(sock, t) == WL_OK)
+        return WL_OK;
+    /* Asked for but unavailable: opening the line directly gives the real
+     * reason (the port is held, the device is missing) instead of a complaint
+     * about a socket. */
+    *cfg = serial_session(baud);
+    return wl_serial_open(line, baud, t);
+}
+
 /*
  * Ctrl-C during exec has to reach the agent: killing the client on the spot
  * would leave the command running on the target, and on Windows 9x an
@@ -505,8 +638,7 @@ static int cmd_exec(int argc, char **argv)
         cmd[at] = '\0';
     }
 
-    cfg = serial_session(baud);
-    if (wl_serial_open(line, baud, &t) != WL_OK) {
+    if (open_line(line, baud, &cfg, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         free(cmd);
         return 125;
@@ -579,8 +711,7 @@ static int cmd_transfer(int argc, char **argv, int is_put)
     if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
         return 1;
 
-    cfg = serial_session(baud);
-    if (wl_serial_open(line, baud, &t) != WL_OK) {
+    if (open_line(line, baud, &cfg, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         return 1;
     }
@@ -633,8 +764,7 @@ static int cmd_sync(int argc, char **argv)
     flags = (uint8_t)((delete_extra ? WL_SYNC_DELETE : 0) | (dry_run ? WL_SYNC_DRY_RUN : 0) |
                       (hidden ? WL_SYNC_HIDDEN : 0));
 
-    cfg = serial_session(baud);
-    if (wl_serial_open(line, baud, &t) != WL_OK) {
+    if (open_line(line, baud, &cfg, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         return 1;
     }
@@ -683,8 +813,7 @@ static int cmd_info(int argc, char **argv)
         line = DEFAULT_LINE;
     if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
         return 1;
-    cfg = serial_session(baud);
-    if (wl_serial_open(line, baud, &t) != WL_OK) {
+    if (open_line(line, baud, &cfg, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         return 1;
     }
@@ -830,8 +959,7 @@ static int cmd_time(int argc, char **argv)
         line = DEFAULT_LINE;
     if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
         return 1;
-    cfg = serial_session(baud);
-    if (wl_serial_open(line, baud, &t) != WL_OK) {
+    if (open_line(line, baud, &cfg, &t) != WL_OK) {
         fprintf(stderr, "w98link: %s\n", wl_error());
         return 1;
     }
@@ -889,6 +1017,119 @@ static int cmd_time(int argc, char **argv)
     return 0;
 }
 
+static volatile sig_atomic_t mux_stop;
+
+static void on_mux_signal(int sig)
+{
+    (void)sig;
+    mux_stop = 1;
+}
+
+static int mux_should_stop(void *ctx)
+{
+    (void)ctx;
+    return mux_stop != 0;
+}
+
+static void mux_log(void *ctx, const char *msg)
+{
+    (void)ctx;
+    fprintf(stderr, "mux: %s\n", msg);
+}
+
+/* Where the pid is left, beside the socket, so --stop has something to aim
+ * at: the protocol has no "go away" record and does not need one. */
+static int mux_pid_path(const char *sock, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "%s.pid", sock);
+
+    return n > 0 && (size_t)n < cap;
+}
+
+static int cmd_mux(int argc, char **argv)
+{
+    const char *line = getenv("W98LINK_LINE");
+    const char *baud_s = NULL;
+    const char *idle_s = NULL;
+    int stop = 0;
+    struct opt opts[] = {
+        {"--line", &line, NULL},
+        {"--baud", &baud_s, NULL},
+        {"--idle", &idle_s, NULL},
+        {"--stop", NULL, &stop},
+    };
+    uint32_t baud = DEFAULT_BAUD;
+    uint32_t idle = 600;
+    struct wl_mux_cfg cfg;
+    struct wl_transport t;
+    char sock[256];
+    char pidfile[288];
+    wl_status s;
+    FILE *f;
+
+    if (parse_all_opts(argc, argv, opts, sizeof(opts) / sizeof(opts[0])) != 0)
+        return 1;
+    if (line == NULL)
+        line = DEFAULT_LINE;
+    if ((baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud)) ||
+        (idle_s && !parse_u32(idle_s, "idle seconds", 86400U, &idle)))
+        return 1;
+    if (!wl_mux_socket_path(line, sock, sizeof(sock)) ||
+        !mux_pid_path(sock, pidfile, sizeof(pidfile))) {
+        fprintf(stderr, "w98link: cannot build a socket path for %s\n", line);
+        return 1;
+    }
+
+    if (stop) {
+        long pid = 0;
+
+        f = fopen(pidfile, "r");
+        if (f != NULL) {
+            char text[32] = "";
+
+            if (fgets(text, (int)sizeof(text), f) != NULL)
+                pid = strtol(text, NULL, 10);
+            (void)fclose(f);
+        }
+        if (pid <= 0) {
+            fprintf(stderr, "w98link: no multiplexer is running for %s\n", line);
+            return 1;
+        }
+        if (kill((pid_t)pid, SIGTERM) != 0) {
+            fprintf(stderr, "w98link: cannot stop pid %ld: %s\n", pid, strerror(errno));
+            return 1;
+        }
+        printf("stopping the multiplexer (pid %ld)\n", pid);
+        return 0;
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.session = serial_session(baud);
+    cfg.socket_path = sock;
+    cfg.idle_exit_ms = idle * 1000U;
+    cfg.stop = mux_should_stop;
+    cfg.log = mux_log;
+    if (wl_serial_open(line, baud, &t) != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    (void)signal(SIGINT, on_mux_signal);
+    (void)signal(SIGTERM, on_mux_signal);
+    f = fopen(pidfile, "w");
+    if (f != NULL) {
+        (void)fprintf(f, "%ld\n", (long)getpid());
+        (void)fclose(f);
+    }
+    s = wl_mux_serve(&t, &cfg, wl_clock_ms() ^ ((uint32_t)getpid() << 16));
+    wl_transport_close(&t);
+    (void)remove(pidfile);
+    if (s != WL_OK) {
+        fprintf(stderr, "w98link: %s\n", wl_error());
+        return 1;
+    }
+    return 0;
+}
+
 static int cmd_put(int argc, char **argv)
 {
     return cmd_transfer(argc, argv, 1);
@@ -910,6 +1151,7 @@ static const struct command commands[] = {
     {"sync", cmd_sync, help_sync},
     {"info", cmd_info, help_info},
     {"time", cmd_time, help_time},
+    {"mux", cmd_mux, help_mux},
     {"put", cmd_put, help_put},
     {"get", cmd_get, help_get},
     {"echo", cmd_echo, help_echo},

@@ -40,6 +40,7 @@ struct wl_peer {
     struct wl_peer_handlers h;
     int is_client;
     uint8_t platform;
+    char build[WL_PEER_BUILD_MAX + 1]; /* empty: report wl_version() */
     uint32_t gen;
     int hello_sent;
     int ready;
@@ -182,7 +183,10 @@ static void send_hello(struct wl_peer *p)
 {
     uint8_t buf[WL_PEER_BUILD_MAX + 16];
     struct wl_wbuf w;
-    const char *v = wl_version();
+    /* Normally this program's own identity. The local multiplexer overrides it
+     * so that a client talking to it sees the agent on the far end of the line
+     * rather than the relay in between, which is what the client asked about. */
+    const char *v = p->build[0] != '\0' ? p->build : wl_version();
     size_t n = strlen(v);
 
     wl_wbuf_init(&w, buf, sizeof(buf));
@@ -572,6 +576,17 @@ void wl_peer_free(struct wl_peer *p)
     for (unsigned i = 0; i < WL_PEER_MAX_CHANNELS; i++)
         free(p->chans[i].q.buf);
     free(p);
+}
+
+void wl_peer_set_identity(struct wl_peer *p, uint8_t platform, const char *build)
+{
+    size_t n = strlen(build);
+
+    p->platform = platform;
+    if (n > WL_PEER_BUILD_MAX)
+        n = WL_PEER_BUILD_MAX;
+    memcpy(p->build, build, n);
+    p->build[n] = '\0';
 }
 
 struct wl_session *wl_peer_session(struct wl_peer *p)

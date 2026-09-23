@@ -96,7 +96,12 @@ static wl_status fd_caps(void *impl, char *out, size_t cap)
     return WL_OK;
 }
 
-static const struct wl_transport_ops fd_ops = {fd_read, fd_write, fd_close, fd_caps};
+static int fd_fd(void *impl)
+{
+    return ((struct fd_impl *)impl)->fd;
+}
+
+static const struct wl_transport_ops fd_ops = {fd_read, fd_write, fd_close, fd_caps, fd_fd};
 
 wl_status wl_fd_transport(int fd, struct wl_transport *out)
 {
