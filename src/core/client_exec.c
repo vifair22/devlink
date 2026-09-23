@@ -13,6 +13,10 @@
  * it. Long enough for a round trip on a slow line and a wedged agent's loop,
  * short enough that a second Ctrl-C is not what ends the client. */
 #define CANCEL_MS 3000U
+/* How much stdin to carry in one record. The same size as a file chunk: big
+ * enough that piped input is not a record per line, small enough that a
+ * chatty command's output still gets a turn between them. */
+#define STDIN_CHUNK 4096U
 
 enum phase { PH_CONNECT, PH_OPENING, PH_RUNNING, PH_DONE, PH_FAILED };
 
@@ -25,6 +29,13 @@ struct client {
     int sessions;
     int cancel_sent;
     uint32_t cancel_at;
+    /* One chunk of stdin on its way over. It is held here rather than handed
+     * straight to the peer because the send can be refused when the channel
+     * is out of credit, and bytes read from the source cannot be read again. */
+    uint8_t in_q[STDIN_CHUNK];
+    size_t in_len;
+    int in_eof;    /* the source said it has no more */
+    int in_closed; /* and the agent has been told */
 };
 
 static void set_message(struct wl_exec_result *out, const char *msg, size_t n)
@@ -68,8 +79,12 @@ static void on_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char 
     }
     c->out->ran = 1;
     c->phase = PH_RUNNING;
-    /* v1 is non-interactive: the command gets an empty stdin. */
-    (void)wl_peer_send(c->peer, ch, WL_EXEC_STDIN_EOF, NULL, 0);
+    /* With no source to read from, the command gets an empty stdin and sees
+     * EOF at once. The queue is empty here, so this send cannot be refused. */
+    if (c->io->input == NULL) {
+        (void)wl_peer_send(c->peer, ch, WL_EXEC_STDIN_EOF, NULL, 0);
+        c->in_closed = 1;
+    }
 }
 
 static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, size_t n)
@@ -105,6 +120,35 @@ static void on_error(void *ctx, uint16_t code, const char *msg, size_t n)
     c->out->fail_code = code;
     set_message(c->out, msg, n);
     c->phase = PH_FAILED;
+}
+
+/*
+ * Moves what the caller has towards the command, a chunk at a time.
+ *
+ * Order matters at the end: EOF is only sent once the last chunk has been
+ * accepted, or a command reading its input would see the stream close with
+ * bytes still behind it.
+ */
+static void pump_stdin(struct client *c)
+{
+    int eof = 0;
+
+    if (c->phase != PH_RUNNING || c->in_closed || c->io->input == NULL || c->cancel_sent)
+        return;
+    if (c->in_len == 0 && !c->in_eof) {
+        size_t n = c->io->input(c->io->ctx, c->in_q, sizeof(c->in_q), &eof);
+
+        c->in_len = n <= sizeof(c->in_q) ? n : sizeof(c->in_q);
+        if (eof)
+            c->in_eof = 1;
+    }
+    if (c->in_len > 0) {
+        if (wl_peer_send(c->peer, c->ch, WL_EXEC_STDIN, c->in_q, c->in_len) != WL_OK)
+            return; /* out of credit; the same bytes go next time round */
+        c->in_len = 0;
+    }
+    if (c->in_eof && wl_peer_send(c->peer, c->ch, WL_EXEC_STDIN_EOF, NULL, 0) == WL_OK)
+        c->in_closed = 1;
 }
 
 struct info_ctx {
@@ -225,6 +269,7 @@ wl_status wl_client_exec(struct wl_transport *t, const struct wl_session_cfg *cf
             if (c.cancel_sent && wl_clock_since(c.cancel_at) >= CANCEL_MS)
                 break;
         }
+        pump_stdin(&c);
         if (c.phase == PH_CONNECT) {
             if (wl_peer_ready(c.peer)) {
                 st = wl_peer_open(c.peer, WL_KIND_EXEC, args, w.len, &c.ch);

@@ -116,10 +116,61 @@ static void on_output(void *ctx, uint8_t stream, const uint8_t *p, size_t n)
     }
 }
 
+/*
+ * Stands in for a pipe or a terminal on the client's side. 'quiet' is how
+ * many times it answers "nothing yet" before handing anything over, which is
+ * what a person typing looks like: the loop has to keep the command's output
+ * moving while nobody is pressing a key. It is a global for the same reason
+ * the capture is: one struct wl_exec_io carries one ctx, and the output
+ * callback already owns it.
+ */
+struct feed {
+    const char *data;
+    size_t len;
+    size_t at;
+    size_t most; /* the most to hand over at once, 0 for as much as fits */
+    int quiet;
+    int calls;
+};
+
+static struct feed feed;
+
+static size_t on_input(void *ctx, uint8_t *p, size_t cap_, int *eof)
+{
+    size_t n;
+
+    (void)ctx;
+    feed.calls++;
+    if (feed.quiet > 0) {
+        feed.quiet--;
+        return 0;
+    }
+    n = feed.len - feed.at;
+    if (n > cap_)
+        n = cap_;
+    if (feed.most > 0 && n > feed.most)
+        n = feed.most;
+    memcpy(p, feed.data + feed.at, n);
+    feed.at += n;
+    if (feed.at == feed.len)
+        *eof = 1;
+    return n;
+}
+
+static wl_status run_with_input(const char *cmd, struct wl_exec_result *r)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_exec_io io = {&cap, on_output, NULL, on_input};
+    static uint32_t seed = 5000;
+
+    memset(&cap, 0, sizeof(cap));
+    return wl_client_exec(&client_t, &cfg, ++seed, cmd, NULL, 0, &io, 5000, r);
+}
+
 static wl_status run(const char *cmd, const char *cwd, uint8_t flags, struct wl_exec_result *r)
 {
     struct wl_session_cfg cfg = fast_session();
-    struct wl_exec_io io = {&cap, on_output, NULL};
+    struct wl_exec_io io = {&cap, on_output, NULL, NULL};
     static uint32_t seed = 1000;
 
     memset(&cap, 0, sizeof(cap));
@@ -202,6 +253,136 @@ static void test_stdin_is_empty(void **state)
 
     (void)state;
     assert_int_equal(run("cat; echo done", NULL, 0, &r), WL_OK);
+    assert_int_equal(cap.out_len, 5);
+    assert_memory_equal(cap.out, "done\n", 5);
+}
+
+/* What the caller offers reaches the command, and the command's answer comes
+ * back: the whole point of the input hook. */
+static void test_stdin_reaches_the_command(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    memset(&feed, 0, sizeof(feed));
+    feed.data = "hello\nworld\n";
+    feed.len = 12;
+    assert_int_equal(run_with_input("cat", &r), WL_OK);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.out_len, 12);
+    assert_memory_equal(cap.out, "hello\nworld\n", 12);
+}
+
+/*
+ * More input than the channel's credit window, handed over in small pieces.
+ * This is the path where a send is refused for want of credit and the same
+ * bytes have to go again next time round: losing them would truncate the
+ * command's input silently, which is the worst shape this bug could take.
+ */
+static void test_stdin_larger_than_the_window_arrives_whole(void **state)
+{
+    struct wl_exec_result r;
+    char *want = malloc(200000);
+    size_t at = 0;
+
+    (void)state;
+    assert_non_null(want);
+    while (at < 200000 - 16)
+        at += (size_t)sprintf(want + at, "%zu\n", at);
+    memset(&feed, 0, sizeof(feed));
+    feed.data = want;
+    feed.len = at;
+    feed.most = 700; /* small enough to need many turns of the loop */
+    assert_int_equal(run_with_input("cat", &r), WL_OK);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.out_len, at);
+    assert_memory_equal(cap.out, want, at);
+    free(want);
+}
+
+/*
+ * A command that reads its input, but not yet: far more than the agent's
+ * stdin queue arrives while it sleeps. Every byte must still reach it.
+ *
+ * This is the case that fails if the agent tells the client it may send more
+ * as soon as a record is delivered rather than as the process reads: the
+ * queue fills, the rest has nowhere to go, and the command quietly gets a
+ * truncated input with nothing anywhere reporting a problem.
+ */
+static void test_input_for_a_slow_reader_is_not_dropped(void **state)
+{
+    struct wl_exec_result r;
+    size_t len = 400000;
+    char *want = malloc(len);
+
+    (void)state;
+    assert_non_null(want);
+    for (size_t i = 0; i < len; i++)
+        want[i] = (char)('a' + (i % 26));
+    memset(&feed, 0, sizeof(feed));
+    feed.data = want;
+    feed.len = len;
+    assert_int_equal(run_with_input("sleep 1; cat", &r), WL_OK);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.out_len, len);
+    assert_memory_equal(cap.out, want, len);
+    free(want);
+}
+
+/*
+ * Input for a command that never reads it. The agent's queue fills, the pipe
+ * behind it fills, and the channel runs out of credit, so sends start being
+ * refused. The command must still finish and the client must still return
+ * its output rather than wedging with bytes it cannot place: "echo y | put
+ * this in front of an installer that ignores stdin" is an ordinary mistake.
+ */
+static void test_input_nobody_reads_does_not_wedge(void **state)
+{
+    struct wl_exec_result r;
+    char *want = malloc(400000);
+
+    (void)state;
+    assert_non_null(want);
+    memset(want, 'y', 400000);
+    memset(&feed, 0, sizeof(feed));
+    feed.data = want;
+    feed.len = 400000;
+    assert_int_equal(run_with_input("sleep 1; echo ignored", &r), WL_OK);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.out_len, 8);
+    assert_memory_equal(cap.out, "ignored\n", 8);
+    free(want);
+}
+
+/* A source with nothing to say yet must not look like a closed one, and must
+ * not stop the command's output while it thinks. */
+static void test_a_quiet_source_is_not_end_of_input(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    memset(&feed, 0, sizeof(feed));
+    feed.data = "late\n";
+    feed.len = 5;
+    feed.quiet = 20;
+    assert_int_equal(run_with_input("echo first; cat", &r), WL_OK);
+    assert_int_equal(r.exit_code, 0);
+    assert_int_equal(cap.out_len, 11);
+    assert_memory_equal(cap.out, "first\nlate\n", 11);
+    assert_true(feed.calls > 20);
+}
+
+/* A source that is empty from the start closes stdin rather than leaving a
+ * reader waiting for input that is never coming. */
+static void test_an_empty_source_closes_stdin(void **state)
+{
+    struct wl_exec_result r;
+
+    (void)state;
+    memset(&feed, 0, sizeof(feed));
+    feed.data = "";
+    feed.len = 0;
+    assert_int_equal(run_with_input("cat; echo done", &r), WL_OK);
     assert_int_equal(cap.out_len, 5);
     assert_memory_equal(cap.out, "done\n", 5);
 }
@@ -316,7 +497,7 @@ static void *cancel_after_300ms(void *arg)
 static void test_cancel_stops_the_command_on_the_agent(void **state)
 {
     struct wl_session_cfg cfg = fast_session();
-    struct wl_exec_io io = {&cap, on_output, &test_cancel};
+    struct wl_exec_io io = {&cap, on_output, &test_cancel, NULL};
     struct wl_exec_result r;
     struct wl_hello hello;
     char marker[64];
@@ -759,6 +940,16 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_working_directory, setup, teardown),
         cmocka_unit_test_setup_teardown(test_bad_directory_is_refused, setup, teardown),
         cmocka_unit_test_setup_teardown(test_stdin_is_empty, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_stdin_reaches_the_command, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_stdin_larger_than_the_window_arrives_whole,
+                                        setup, teardown),
+        cmocka_unit_test_setup_teardown(test_input_for_a_slow_reader_is_not_dropped, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_input_nobody_reads_does_not_wedge, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_a_quiet_source_is_not_end_of_input, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_an_empty_source_closes_stdin, setup, teardown),
         cmocka_unit_test_setup_teardown(test_consecutive_clients, setup, teardown),
         cmocka_unit_test_setup_teardown(test_agent_stop_command, setup, teardown),
         cmocka_unit_test_setup_teardown(test_unknown_agent_command_is_refused, setup,

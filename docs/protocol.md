@@ -207,6 +207,13 @@ as its consumer drains data. A sender never exceeds its credit. This keeps a
 slow consumer, such as a full pipe on the agent or a slow disk, from stalling
 every other channel.
 
+"As its consumer drains" is the whole of it. A receiver that credits on
+arrival instead has promised room it does not have: where the records land in
+a buffer something else empties, such as a command's stdin waiting on the
+process to read, the sender refills faster than the buffer drains and the
+overflow is lost. The agent therefore holds an EXEC channel's credit until the
+bytes have been written to the process.
+
 ### Channel lifecycle
 
 The side that starts an operation picks a free channel number and sends OPEN
@@ -288,8 +295,10 @@ Closing an EXEC channel outright has the same effect on the process but tells
 the client nothing, so CANCEL is preferred where the client intends to keep
 the session.
 
-STDIN is carried from v1 so that the v2 interactive shell needs no protocol
-change. A v1 client simply sends STDIN_EOF straight away.
+STDIN carries the command's input. The client forwards its own stdin when that
+is a file or a pipe, or on request from a terminal, and sends STDIN_EOF when
+the source is finished; a client with no input to offer sends STDIN_EOF as soon
+as the channel opens, and the command sees end of file at once.
 
 A command starting with `@` addresses the agent itself rather than the shell.
 Unknown `@` commands are refused with OPEN_FAIL. v1 has two:

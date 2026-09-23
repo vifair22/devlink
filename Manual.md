@@ -223,7 +223,7 @@ device is plugged in first.
 ### exec
 
 ```
-devlink exec [--cwd DIR] [--merge] [--] COMMAND...
+devlink exec [--cwd DIR] [--merge] [--stdin | --no-stdin] [--] COMMAND...
 ```
 
 Runs COMMAND on the target through its shell and streams stdout and stderr
@@ -245,8 +245,35 @@ the command could not be run at all (the agent refused it, or the link
 failed). Read section 10 on exit codes under Windows 9x, which has an
 important caveat.
 
-**Input:** v1 gives the command an empty stdin. A program that reads input
-sees end of file at once rather than hanging.
+**Input.** What the client reads on its own stdin is forwarded to the command,
+so the usual shell idioms work:
+
+```sh
+devlink exec sort < names.txt
+echo y | devlink exec 'C:\SETUP.EXE /q'
+devlink exec --stdin 'C:\SETUP.EXE'      # answer its prompts by hand
+```
+
+Whether input is forwarded depends on where the client's own stdin comes from:
+
+| The client's stdin | Forwarded | Why |
+| --- | --- | --- |
+| a file or a pipe | yes | it was redirected on purpose, for the command |
+| a terminal | no | the keys are meant for your own shell |
+| a terminal, with `--stdin` | yes | you are answering the command yourself |
+| anything, with `--no-stdin` | no | the command gets end of file at once |
+
+A terminal is left alone for the same reason `ssh` has `-n`: most commands over
+there never read stdin, and a client that read the terminal anyway would eat
+what you type into the shell that started it. With `--stdin`, Ctrl-D ends the
+input and the command sees end of file; Ctrl-C still cancels the command.
+
+Input is paced by the command, not by the client. The agent holds a queue of
+one flow-control window (64 KB) and tells the client it may send more only as
+the process reads, so a slow reader on the target slows the sender here rather
+than losing what will not fit. That is worth stating because it was not always
+so: crediting on arrival instead let a client outrun a command that was not
+reading yet, and the overflow went on the floor with nothing reported.
 
 **Drives that are not ready.** A command naming a drive letter that has no
 media in it is refused before it starts, with `drive D: is not ready` and exit

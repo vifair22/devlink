@@ -32,6 +32,7 @@ struct chan {
     uint32_t credit;  /* bytes the peer lets us send on this channel */
     uint32_t granted; /* bytes we have let the peer send, not yet received */
     uint32_t consumed; /* received since our last WINDOW */
+    int hold;          /* credit is granted by the application, not on delivery */
     struct queue q;
 };
 
@@ -130,6 +131,7 @@ static struct chan *alloc_chan(struct wl_peer *p, uint16_t id, enum chan_state s
         c->credit = WL_CREDIT_INITIAL;
         c->granted = WL_CREDIT_INITIAL;
         c->consumed = 0;
+        c->hold = 0;
         queue_clear(&c->q);
         return c;
     }
@@ -374,9 +376,11 @@ static void on_channel_record(struct wl_peer *p, uint16_t id, uint8_t type,
         return;
     }
     c->granted -= (uint32_t)n;
-    c->consumed += (uint32_t)n;
-    if (c->consumed >= WL_CREDIT_TOPUP)
-        send_window(p, c);
+    if (!c->hold) {
+        c->consumed += (uint32_t)n;
+        if (c->consumed >= WL_CREDIT_TOPUP)
+            send_window(p, c);
+    }
     if (p->h.record != NULL && !c->we_closed)
         p->h.record(p->h.ctx, id, type, pl, n);
 }
@@ -696,6 +700,27 @@ size_t wl_peer_write(struct wl_peer *p, uint16_t ch, uint8_t type, const uint8_t
         done += k;
     }
     return done;
+}
+
+wl_status wl_peer_hold_credit(struct wl_peer *p, uint16_t ch)
+{
+    struct chan *c = find_chan(p, ch);
+
+    if (c == NULL)
+        return wl_fail(WL_ERR_INVAL, "peer: channel %u is not open", (unsigned)ch);
+    c->hold = 1;
+    return WL_OK;
+}
+
+void wl_peer_consumed(struct wl_peer *p, uint16_t ch, size_t n)
+{
+    struct chan *c = find_chan(p, ch);
+
+    if (c == NULL || n == 0)
+        return;
+    c->consumed += (uint32_t)n;
+    if (c->consumed >= WL_CREDIT_TOPUP)
+        send_window(p, c);
 }
 
 wl_status wl_peer_close(struct wl_peer *p, uint16_t ch)

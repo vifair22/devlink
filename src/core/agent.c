@@ -727,6 +727,10 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     } else {
         e->active = 1;
         e->ch = ch;
+        /* Input is credited as the process takes it, not as it arrives: the
+         * queue below is exactly one credit window, and that only holds if
+         * the client is told to refill at the rate the command reads. */
+        (void)wl_peer_hold_credit(a->peer, ch);
         log_line(a, "exec: ", cmd_z);
         emit_work(a, ch, WL_KIND_EXEC, cmd_z, 0);
     }
@@ -1446,8 +1450,10 @@ static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, si
         return;
     if (type == WL_EXEC_STDIN) {
         /* The credit window (64 KiB) is the most the client can have in
-         * flight, and the queue is that size, so it cannot overflow unless
-         * the client breaks the protocol; if it does, the excess is lost. */
+         * flight and the queue is that size, so this cannot overflow: credit
+         * is held until the process reads (wl_peer_hold_credit at open), so
+         * the window empties at the pace the command does. A client that
+         * breaks the protocol loses the excess rather than this buffer. */
         size_t room = STDIN_QUEUE - e->stdin_len;
         size_t k = n < room ? n : room;
 
@@ -1563,6 +1569,7 @@ static void service_exec(struct agent *a, struct exec *e)
 
             memmove(e->stdin_q, e->stdin_q + n, e->stdin_len - n);
             e->stdin_len -= n;
+            wl_peer_consumed(a->peer, e->ch, n);
         }
         if (e->stdin_eof && e->stdin_len == 0) {
             wl_proc_close_stdin(e->proc);

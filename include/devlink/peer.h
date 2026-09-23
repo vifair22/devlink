@@ -97,6 +97,25 @@ size_t wl_peer_write(struct wl_peer *p, uint16_t ch, uint8_t type, const uint8_t
 
 wl_status wl_peer_close(struct wl_peer *p, uint16_t ch);
 
+/*
+ * Holds back this channel's flow-control credit until the application says
+ * the bytes have been used, rather than granting more as soon as a record is
+ * handed to the handler.
+ *
+ * It is for a channel whose records land in a buffer of their own that
+ * something else drains: a command's stdin, waiting for the process to read
+ * it. Crediting on delivery lets the sender refill faster than that buffer
+ * empties, and what does not fit has nowhere to go but the floor. Held, the
+ * window and the buffer mean the same thing again.
+ *
+ * A channel in this mode must report everything it takes, or the sender runs
+ * out of credit and stops.
+ */
+wl_status wl_peer_hold_credit(struct wl_peer *p, uint16_t ch);
+
+/* Reports n bytes of a held channel as used, which may grant the sender more. */
+void wl_peer_consumed(struct wl_peer *p, uint16_t ch, size_t n);
+
 /* Nothing queued in the mux and nothing unacknowledged below it. */
 int wl_peer_idle(const struct wl_peer *p);
 

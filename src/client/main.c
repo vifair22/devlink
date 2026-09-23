@@ -57,16 +57,24 @@ static const char *const help_echo =
     "  --size N      payload bytes per frame, up to 1024 (default 1024)\n";
 
 static const char *const help_exec =
-    "usage: devlink exec [--line PATH] [--baud N] [--cwd DIR] [--merge] [--] COMMAND...\n"
+    "usage: devlink exec [--line PATH] [--baud N] [--cwd DIR] [--merge]\n"
+    "                    [--stdin | --no-stdin] [--] COMMAND...\n"
     "\n"
     "Runs COMMAND on the agent through its shell (command.com on Win9x,\n"
     "cmd.exe on NT) and streams stdout and stderr back. Exits with the\n"
     "command's exit status, or 125 if it could not be run at all.\n"
     "\n"
+    "Input is forwarded when this command's own stdin is a file or a pipe,\n"
+    "so 'devlink exec sort < list.txt' and 'echo y | devlink exec setup'\n"
+    "work. From a terminal it is not, since a command that ignores stdin\n"
+    "would otherwise swallow what you type at your own shell.\n"
+    "\n"
     "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --cwd DIR     directory to run in, on the agent (default: its own)\n"
-    "  --merge       send stderr down stdout, preserving their interleaving\n";
+    "  --merge       send stderr down stdout, preserving their interleaving\n"
+    "  --stdin       forward this terminal's input too; Ctrl-D ends it\n"
+    "  --no-stdin    never forward; the command sees an empty stdin\n";
 
 static const char *const help_sync =
     "usage: devlink sync [--line PATH] [--baud N] [--delete] [--dry-run]\n"
@@ -605,21 +613,58 @@ static void on_interrupt(int sig)
     (void)!write(2, msg, sizeof(msg) - 1);
 }
 
+/*
+ * Hands the exec loop whatever is already on our stdin, and nothing more.
+ *
+ * The poll with a zero timeout is the whole point: this is called from the
+ * same loop that carries the command's output, so blocking for a keystroke
+ * here would stop a chatty command dead while somebody thinks.
+ */
+static size_t exec_input(void *ctx, uint8_t *p, size_t cap, int *eof)
+{
+    struct pollfd pf;
+    ssize_t n;
+
+    (void)ctx;
+    pf.fd = STDIN_FILENO;
+    pf.events = POLLIN;
+    pf.revents = 0;
+    if (poll(&pf, 1, 0) <= 0)
+        return 0;
+    n = read(STDIN_FILENO, p, cap);
+    if (n > 0)
+        return (size_t)n;
+    if (n == 0) {
+        *eof = 1;
+        return 0;
+    }
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+        return 0;
+    /* A broken stdin is not worth failing the command over; the command is
+     * simply told there is no more input. */
+    *eof = 1;
+    return 0;
+}
+
 static int cmd_exec(int argc, char **argv)
 {
     const char *line = getenv("DEVLINK_LINE");
     const char *baud_s = NULL;
     const char *cwd = NULL;
     int merge = 0;
+    int want_stdin = 0;
+    int no_stdin = 0;
     struct opt opts[] = {
         {"--line", &line, NULL},
         {"--baud", &baud_s, NULL},
         {"--cwd", &cwd, NULL},
         {"--merge", NULL, &merge},
+        {"--stdin", NULL, &want_stdin},
+        {"--no-stdin", NULL, &no_stdin},
     };
     uint32_t baud = DEFAULT_BAUD;
     struct wl_session_cfg cfg;
-    struct wl_exec_io io = {NULL, exec_output, &exec_cancel};
+    struct wl_exec_io io = {NULL, exec_output, &exec_cancel, NULL};
     struct wl_exec_result r;
     struct wl_transport t;
     char *cmd;
@@ -634,6 +679,19 @@ static int cmd_exec(int argc, char **argv)
         (void)usage_error("missing", "COMMAND");
         return 125;
     }
+    if (want_stdin && no_stdin) {
+        (void)usage_error("cannot be used together", "--stdin and --no-stdin");
+        return 125;
+    }
+    /*
+     * A file or a pipe is input meant for the command, so it goes. A terminal
+     * is not: most commands over there ignore stdin, and forwarding it would
+     * take the keys meant for the shell this was started from, which is the
+     * same reason ssh has -n. Ask for it with --stdin when the command really
+     * does want to be typed at.
+     */
+    if (!no_stdin && (want_stdin || !isatty(STDIN_FILENO)))
+        io.input = exec_input;
     if (line == NULL)
         line = DEFAULT_LINE;
     if (baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud))
@@ -909,7 +967,7 @@ static int reply_text(const struct reply *r, const char *name, char *out, size_t
 static int ask_agent(struct wl_transport *t, const struct wl_session_cfg *cfg,
                      const char *cmd, struct reply *out)
 {
-    struct wl_exec_io io = {out, reply_output, NULL};
+    struct wl_exec_io io = {out, reply_output, NULL, NULL};
     struct wl_exec_result r;
 
     memset(out, 0, sizeof(*out));

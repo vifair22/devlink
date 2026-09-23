@@ -25,6 +25,18 @@ struct wl_exec_io {
      * killing the client, or the command is left running over there.
      */
     const volatile sig_atomic_t *cancel;
+    /*
+     * Fills p with up to cap bytes for the command's stdin and returns how
+     * many it wrote. Returning 0 means nothing is available yet; setting
+     * *eof means the source is finished, after which it is not called again
+     * and the agent is told stdin is closed.
+     *
+     * It must not block. The same loop carries the command's output, so
+     * waiting here for a keystroke would stall everything the command is
+     * printing. NULL gives the command an empty stdin, which is what a
+     * non-interactive run wants.
+     */
+    size_t (*input)(void *ctx, uint8_t *p, size_t cap, int *eof);
 };
 
 struct wl_exec_result {

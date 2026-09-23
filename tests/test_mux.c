@@ -174,7 +174,7 @@ static void *run_job(void *arg)
 {
     struct job *j = arg;
     struct wl_session_cfg cfg = local_session();
-    struct wl_exec_io io = {&j->cap, on_output, NULL};
+    struct wl_exec_io io = {&j->cap, on_output, NULL, NULL};
     struct wl_transport t;
 
     j->st = wl_unix_connect(h.sock, &t);
@@ -271,7 +271,7 @@ static void test_one_client_leaving_does_not_disturb_the_other(void **state)
     struct wl_transport t;
     struct wl_exec_result r;
     struct capture cap;
-    struct wl_exec_io io = {&cap, on_output, NULL};
+    struct wl_exec_io io = {&cap, on_output, NULL, NULL};
 
     (void)state;
     wait_for_the_line();
@@ -307,7 +307,7 @@ static void test_a_client_arriving_before_the_line_is_up_is_served(void **state)
     struct wl_transport t;
     struct wl_exec_result r;
     struct capture cap;
-    struct wl_exec_io io = {&cap, on_output, NULL};
+    struct wl_exec_io io = {&cap, on_output, NULL, NULL};
     uint32_t start = wl_clock_ms();
 
     (void)state;
@@ -380,7 +380,7 @@ static void test_channels_are_released_so_a_long_session_does_not_run_out(void *
     for (int i = 0; i < 20; i++) {
         struct wl_exec_result r;
         struct capture cap;
-        struct wl_exec_io io = {&cap, on_output, NULL};
+        struct wl_exec_io io = {&cap, on_output, NULL, NULL};
         struct wl_transport t;
 
         memset(&cap, 0, sizeof(cap));

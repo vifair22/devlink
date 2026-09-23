@@ -341,7 +341,7 @@ static void test_a_running_command_is_listed_while_it_runs(void **state)
 {
     static const char *cmd = "printf 'go\\n'; sleep 0.4";
     struct wl_session_cfg cfg;
-    struct wl_exec_io io = {NULL, on_output, NULL};
+    struct wl_exec_io io = {NULL, on_output, NULL, NULL};
     struct wl_exec_result r;
     struct wl_mon_totals tot;
 
