@@ -534,6 +534,39 @@ static void test_cancel_stops_the_command_on_the_agent(void **state)
 }
 
 /*
+ * The same, for work the command's shell handed to a child of its own: here a
+ * pipeline, the shape a cancelled "dd | gzip" has. Killing only the shell
+ * leaves the subshell running with the output pipe open, so the marker
+ * appears two seconds later. The whole tree has to go.
+ */
+static void test_cancel_stops_what_the_command_started(void **state)
+{
+    struct wl_session_cfg cfg = fast_session();
+    struct wl_exec_io io = {&cap, on_output, &test_cancel, NULL};
+    struct wl_exec_result r;
+    char marker[64];
+    char cmd[160];
+    pthread_t th;
+
+    (void)state;
+    memset(&cap, 0, sizeof(cap));
+    test_cancel = 0;
+    sprintf(marker, "/tmp/devlink-cancel-tree-%ld", (long)getpid());
+    (void)remove(marker);
+    sprintf(cmd, "(sleep 2; touch %s) | cat", marker);
+
+    assert_int_equal(pthread_create(&th, NULL, cancel_after_300ms, NULL), 0);
+    assert_int_equal(wl_client_exec(&client_t, &cfg, 7778, cmd, NULL, 0, &io, 5000, &r),
+                     WL_OK);
+    assert_int_equal(pthread_join(th, NULL), 0);
+    assert_true(r.cancelled);
+    assert_true(r.cancel_acked);
+    usleep(2500000);
+    assert_int_equal(access(marker, F_OK), -1);
+    (void)remove(marker);
+}
+
+/*
  * A command naming an empty drive must be refused before it starts. On the
  * target, starting it costs the whole agent: the DOS prompt it raises freezes
  * Windows behind it and only a keypress there ends it.
@@ -957,6 +990,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_abandoned_command_does_not_block_the_next_client,
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_cancel_stops_the_command_on_the_agent, setup,
+                                        teardown),
+        cmocka_unit_test_setup_teardown(test_cancel_stops_what_the_command_started, setup,
                                         teardown),
         cmocka_unit_test_setup_teardown(test_command_naming_an_empty_drive_is_refused, setup,
                                         teardown),

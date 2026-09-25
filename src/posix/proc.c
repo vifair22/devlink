@@ -95,6 +95,10 @@ wl_status wl_proc_start(const char *cmd, const char *cwd, int merge_stderr,
         return s;
     }
     if (pid == 0) {
+        /* Its own process group, so wl_proc_kill can take down everything the
+         * shell starts. Killing the shell alone leaves a pipeline or a
+         * background job running with the output pipe open. */
+        (void)setsid();
         (void)dup2(in[0], 0);
         (void)dup2(o[1], 1);
         (void)dup2(merge_stderr ? o[1] : e[1], 2);
@@ -199,8 +203,15 @@ int wl_proc_exited(struct wl_proc *p, uint32_t *code)
 
 void wl_proc_kill(struct wl_proc *p)
 {
-    if (!p->exited)
+    /* The group, not just the shell (see the setsid in wl_proc_start), but
+     * only while the shell is unreaped: until then its pid, and so the group
+     * id, cannot belong to anyone else. Once the shell has exited, whatever
+     * is left in the group was put in the background on purpose. The pid
+     * itself as well, for a kill that lands before the child's setsid. */
+    if (!p->exited) {
+        (void)kill(-p->pid, SIGKILL);
         (void)kill(p->pid, SIGKILL);
+    }
 }
 
 int wl_proc_reap(struct wl_proc *p)
