@@ -48,15 +48,18 @@ typedef int (*wl_fs_walk_cb)(void *ctx, const char *rel, uint64_t size, uint64_t
 wl_status wl_fs_walk(const char *root, int include_hidden, wl_fs_walk_cb cb, void *ctx);
 
 /*
- * Nonzero if a drive letter can be used: it exists, and if it is removable
- * there is media in it. A letter that means nothing on the platform (every
- * letter, on POSIX) counts as usable, so callers need no platform test.
+ * Nonzero if a command may name a drive letter. On Windows 9x: the drive
+ * exists, and if it is removable there is media in it. Everywhere else,
+ * always: on NT an empty drive is an ordinary error, and a letter that means
+ * nothing on the platform (every letter, on POSIX) needs no check, so
+ * callers need no platform test.
  *
  * This exists to keep a command naming an empty removable drive away from
  * command.com. The Win32 call fails cleanly under the error mode the agent
  * sets; DOS instead stops on a critical-error prompt that freezes the whole
  * agent until somebody presses a key at the target
- * (docs/bug-critical-error-hang.md).
+ * (docs/bug-critical-error-hang.md). NT's cmd.exe is a Win32 process and
+ * honours that error mode, so there is nothing to keep away.
  */
 int wl_fs_drive_ready(char letter);
 

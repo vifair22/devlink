@@ -275,13 +275,16 @@ than losing what will not fit. That is worth stating because it was not always
 so: crediting on arrival instead let a client outrun a command that was not
 reading yet, and the overflow went on the floor with nothing reported.
 
-**Drives that are not ready.** A command naming a drive letter that has no
-media in it is refused before it starts, with `drive D: is not ready` and exit
-status 125. This is not tidiness: on Windows 9x such a command stops inside DOS
-on a prompt that freezes the whole agent (section 10), so it must never be
-started. Letters are read from the whole command line, including arguments, and
-a letter joined to the word before it (`prod:`) is not treated as a drive. Put
-a disc in and the same command runs.
+**Drives that are not ready (Windows 9x).** On Windows 9x a command naming a
+drive letter that has no media in it is refused before it starts, with
+`drive D: is not ready` and exit status 125. This is not tidiness: there such a
+command stops inside DOS on a prompt that freezes the whole agent (section 10),
+so it must never be started. Letters are read from the whole command line,
+including arguments, and a letter joined to the word before it (`prod:`) is not
+treated as a drive. Put a disc in and the same command runs. On Windows NT
+(2000, XP) there is no such check: the shell is `cmd.exe`, which honours the
+agent's error mode, so an empty drive fails like any other error
+(`The device is not ready.`, exit 1) and cannot hang anything.
 
 **Interrupting a command (Ctrl-C).** Ctrl-C does not simply kill the client:
 it sends a cancel to the agent, which kills the command over there and

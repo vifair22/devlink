@@ -211,6 +211,17 @@ int wl_fs_drive_ready(char letter)
     DWORD freec;
     DWORD totalc;
 
+    /*
+     * Only Windows 9x needs this. On NT the shell is cmd.exe, a Win32
+     * process that inherits the agent's error mode, so an empty drive is an
+     * ordinary error ("The device is not ready.", exit 1) and nothing hangs:
+     * checked on Windows 2000 with dir and vol on an empty CD drive. There
+     * the refusal only got in the way, of commands naming a drive that will
+     * exist by the time it is used (a virtual disk being mounted) and of
+     * colons that are not drives at all (shutdown /T:0).
+     */
+    if ((GetVersion() & 0x80000000UL) == 0)
+        return 1;
     if (letter >= 'a' && letter <= 'z')
         letter = (char)(letter - 'a' + 'A');
     if (letter < 'A' || letter > 'Z')
