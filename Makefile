@@ -3,6 +3,7 @@
 # make              build the Linux client into build/bin/
 # make debug asan   the other Linux build variants
 # make agent        cross-build the Windows agent with Open Watcom
+# make agent-linux  the Linux agent, static; CC= for a cross compiler
 # make test         build and run the cmocka suite
 # make test-junit   the same suite, with JUnit XML under build/junit/
 # make coverage     run the suite under gcov and enforce the line gate
@@ -11,7 +12,8 @@
 # make clean        remove build/
 #
 # Build artifacts live under build/, one subdirectory per variant, with the
-# ready-to-run binaries (both the client and DEVLINK.EXE) in build/bin/.
+# ready-to-run binaries (the client, DEVLINK.EXE and devlink-agent) in
+# build/bin/.
 
 PYTHON ?= python3
 
@@ -44,6 +46,10 @@ AGENT_SHARED   := $(filter-out $(AGENT_ENTRY) $(AGENTW_ENTRY),\
                   $(wildcard $(SRC_DIR)/agent/*.c)) $(wildcard $(SRC_DIR)/win32/*.c)
 AGENT_SOURCES  := $(AGENT_ENTRY) $(AGENT_SHARED)
 AGENTW_SOURCES := $(AGENTW_ENTRY) $(AGENT_SHARED)
+# The Linux agent: the same core over the POSIX layer, minus what only the
+# client uses (the multiplexer and its socket).
+LINUX_AGENT_SOURCES := $(CORE_SOURCES) $(SRC_DIR)/linux/main.c \
+                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c serial.c)
 
 # Vendored zlib: built once with its own flags into an archive, never subject
 # to this project's warnings, analysis or coverage (third_party/zlib/VENDORED.md).
@@ -75,7 +81,7 @@ DEBUG_FLAGS    := -Og -g3 -fno-omit-frame-pointer
 ASAN_FLAGS     := -Og -g3 -fsanitize=address,undefined -fno-omit-frame-pointer
 COVERAGE_FLAGS := -Og -g --coverage
 
-.PHONY: all release debug asan agent dist test test-junit coverage coverage-run \
+.PHONY: all release debug asan agent agent-linux dist test test-junit coverage coverage-run \
         analyze tidy clean help variant
 
 all: release
@@ -198,6 +204,45 @@ $(AGENTW): $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_ZLIB_OBJS) $(WAT_RES) | $(BIN
 	$(WAT_ENV) wrc -q -bt=nt $(WAT_RES) $@
 	@chmod 755 $@
 
+# ---------------------------------------------------------------------------
+# Linux agent
+# ---------------------------------------------------------------------------
+
+# For devlink-rescue, a small Linux image that boots on a machine whose own OS
+# will not. Static, so it needs nothing from the image but a kernel. CC is
+# whatever the image's toolchain is (an i586 musl gcc from Buildroot), and
+# LINUX_AGENT_ARCH carries its CPU flags; with neither set it builds for this
+# machine, which is how it is checked here. Its objects, zlib's included, live
+# apart from everything else because they may be for another architecture.
+# DEVLINK_AGENT is what lets this build, and no other POSIX one, set the clock.
+LINUX_AGENT      := $(BIN_DIR)/devlink-agent
+LINUX_AGENT_DIR  := $(BUILD_DIR)/linux-agent
+LINUX_AGENT_ARCH ?=
+LINUX_AGENT_CFLAGS := $(LINUX_AGENT_ARCH) -DDEVLINK_AGENT
+LINUX_AGENT_CPPFLAGS := -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_GNU_SOURCE \
+                        -DDEVLINK_VERSION='"$(VERSION)_$(BUILD_ID).linux"'
+LINUX_AGENT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(LINUX_AGENT_DIR)/%.o,$(LINUX_AGENT_SOURCES)) \
+                    $(patsubst $(ZLIB_DIR)/%.c,$(LINUX_AGENT_DIR)/zlib/%.o,$(ZLIB_SOURCES))
+
+agent-linux: $(LINUX_AGENT)
+
+$(LINUX_AGENT): $(LINUX_AGENT_OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS_COMMON) $(RELEASE_FLAGS) $(LINUX_AGENT_CFLAGS) -static -o $@ \
+	    $(LINUX_AGENT_OBJS)
+
+$(LINUX_AGENT_DIR)/zlib/%.o: $(ZLIB_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -w $(LINUX_AGENT_ARCH) -I$(ZLIB_DIR) -c $< -o $@
+
+$(LINUX_AGENT_DIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LINUX_AGENT_CPPFLAGS) $(CFLAGS_COMMON) $(RELEASE_FLAGS) \
+	    $(LINUX_AGENT_CFLAGS) -MMD -MP -c $< -o $@
+
+# The same stamp rule as the client's version.o, for the same reason.
+$(LINUX_AGENT_DIR)/core/version.o: $(filter-out $(SRC_DIR)/core/version.c,$(LINUX_AGENT_SOURCES)) \
+                                   $(wildcard $(INC_DIR)/devlink/*.h) release_version
+
 # A look at the windowed agent without a Windows machine: Wine draws it on a
 # headless X server and the framebuffer becomes a PNG. Nothing in DEVLINKW.EXE
 # is reachable from the test suite, so this is how it is checked at all. Wine
@@ -298,13 +343,16 @@ analyze:
 	@cppcheck --enable=warning,performance,portability \
 	    --check-level=exhaustive --inline-suppr --error-exitcode=1 --quiet \
 	    --suppress=missingIncludeSystem --suppress=checkersReport \
-	    -I$(INC_DIR) $(SRC_DIR)/core $(SRC_DIR)/client $(wildcard $(SRC_DIR)/posix)
+	    -I$(INC_DIR) $(SRC_DIR)/core $(SRC_DIR)/client $(SRC_DIR)/posix $(SRC_DIR)/linux
 	@echo "== gcc -fanalyzer"
 	@$(CC) $(CPPFLAGS_COMMON) -DVARIANT=analyze $(CFLAGS_COMMON) -O2 \
 	    -fanalyzer -fsyntax-only $(NATIVE_SOURCES)
+	@echo "== gcc -fanalyzer (Linux agent)"
+	@$(CC) $(CPPFLAGS_COMMON) -DVARIANT=analyze -DDEVLINK_AGENT $(CFLAGS_COMMON) -O2 \
+	    -fanalyzer -fsyntax-only $(SRC_DIR)/linux/main.c $(SRC_DIR)/posix/clock.c
 	@echo "== stack usage"
 	@rm -rf $(BUILD_DIR)/stack && mkdir -p $(BUILD_DIR)/stack
-	@for f in $(NATIVE_SOURCES); do \
+	@for f in $(NATIVE_SOURCES) $(SRC_DIR)/linux/main.c; do \
 	    obj=$(BUILD_DIR)/stack/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    $(CC) $(CPPFLAGS_COMMON) -DVARIANT=stack $(CFLAGS_COMMON) -O2 \
 	        -fstack-usage -c $$f -o $$obj || exit 1; \
@@ -330,6 +378,9 @@ JOBS := $(shell nproc 2>/dev/null || echo 4)
 tidy:
 	@echo $(NATIVE_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
 	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -std=c11
+	@echo "== Linux agent"
+	@echo $(SRC_DIR)/linux/main.c $(SRC_DIR)/posix/clock.c | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -DDEVLINK_AGENT -std=c11
 	@if [ -z "$(WIN_TIDY_INC)" ]; then \
 	    echo "== win32: skipped, no mingw-w64 headers found (install them to lint it)"; \
 	else \
@@ -348,4 +399,4 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 help:
-	@sed -n '2,14p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,16p' Makefile | sed 's/^# \{0,1\}//'

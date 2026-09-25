@@ -74,6 +74,7 @@ upstream Linux release into `~/.local/opt/watcom`, or point `WATCOM=` at it.
 ```sh
 make            # the client       -> build/bin/devlink
 make agent      # the agent        -> build/bin/DEVLINK.EXE
+make agent-linux  # Linux agent    -> build/bin/devlink-agent
 make test       # the whole suite
 make coverage   # line coverage, gated at 80%
 make analyze    # cppcheck, gcc -fanalyzer, stack usage
@@ -206,6 +207,49 @@ console window on the desktop. Reasons to prefer the console: `echo` and
 `linktest` (section 9) are console-only, and a windowed program on Windows
 2000 cannot write to the console that started it, which is why the two are
 separate programs rather than one.
+
+### The Linux agent
+
+```
+devlink-agent serve [PORT] [BAUD]      defaults: /dev/ttyS0 115200
+devlink-agent echo [PORT] [BAUD] [IDLE_SECONDS]
+devlink-agent linktest [PORT] [BAUD] [WAIT_SECONDS]
+devlink-agent --version
+```
+
+The same agent over the POSIX platform layer, for devlink-rescue: a small
+Linux image that boots on a 32-bit-era machine whose own OS will not, so a
+session can survey it and repair its disks from the other end of the cable.
+`info` reports its platform as Linux. Everything in section 6 works against
+it; commands run under `/bin/sh -c`, and paths are Linux paths.
+
+```sh
+make agent-linux                                   # for this machine
+make agent-linux CC=i586-linux-gcc LINUX_AGENT_ARCH=-march=i586
+```
+
+It is linked statically, so it needs nothing from the image but a kernel. The
+second form is how the image's own toolchain builds it; its objects, zlib's
+included, are kept under `build/linux-agent/` apart from the client's because
+they may be for another architecture.
+
+It is meant to run under init, which restarts it when it exits. That makes
+`@stop` the whole update procedure: `put` the new binary over the old one
+(Linux lets a running binary be renamed over), then `@stop`, and init starts
+the new one. SIGTERM and SIGINT end the serve loop cleanly.
+
+Two things differ from the Windows agent, both in the POSIX layer and so also
+true of the agent the test suite runs:
+
+- **A cancelled command takes everything it started with it.** Each command
+  runs in a session of its own and a cancel kills the group, so a cancelled
+  `dd | gzip` stops rather than running on with the output pipe held open.
+  Something a command left in the background after its shell had already
+  exited is not touched.
+- **`time --set` works** (section 6), but sets only the system clock. The
+  hardware clock of a Windows machine keeps local time, which the agent does
+  not know, so writing it is left to the session:
+  `hwclock --localtime --systohc` once the time is right.
 
 ## 6. Client commands
 
@@ -407,6 +451,9 @@ than the originals and then misses real changes. The A21m's RTC drifts minutes a
 day, and a machine whose CMOS battery has died starts somewhere in the last
 century, so this is worth running after every boot until the battery is
 replaced.
+
+On the Linux agent it sets the system clock only; section 5, "The Linux
+agent", says why and what writes the hardware clock.
 
 **What is set is UTC**, not local time. The protocol's file times are UTC, so
 that is what has to be right; if the target's time zone is set wrongly its

@@ -189,6 +189,27 @@ they turned up.
   nor `pkill devlink` found it. A `prctl(PR_SET_NAME)` restores the name
   without giving up execing the running image.
 
+## The Linux agent
+
+Added 2026-09-25 for devlink-rescue (git.airies.net/vifair22/devlink-rescue),
+a small Linux image for 32-bit-era machines that will not boot their own OS.
+The agent core was already platform-neutral and the suite already ran it as a
+Linux peer, so the port is an entry file (`src/linux/main.c`) and a static
+build target (`make agent-linux`, with `CC` and `LINUX_AGENT_ARCH` for the
+image's i586 toolchain). Two changes to the POSIX layer came with it:
+
+- **Cancel kills the process group.** Commands get a session of their own and
+  `wl_proc_kill` signals the group while the shell is unreaped. Found by
+  writing the test first: a cancelled `(sleep 2; touch M) | cat` still made
+  its marker.
+- **The agent build may set the clock** (`-DDEVLINK_AGENT`). Every other POSIX
+  build still refuses, so no test can move a developer's clock. System clock
+  only; the hardware clock is left to `hwclock --localtime`, since Windows
+  keeps it in local time.
+
+Checked end to end with the real binaries over a socat pty pair: info, exec
+with stdin and exit status, a 200 KB put, @time, and @stop.
+
 ## Targets
 
 **Retargeted 2026-09-22: Windows 2000 is the primary target.** The A21m is

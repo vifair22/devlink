@@ -1,3 +1,6 @@
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
 #include <time.h>
 
 #include "devlink/clock.h"
@@ -44,6 +47,25 @@ void wl_clock_zone_name(char *buf, size_t cap)
 
 wl_status wl_clock_set_utc(uint64_t secs)
 {
+#ifdef DEVLINK_AGENT
+    /*
+     * The Linux agent runs a machine, often one whose CMOS battery is why the
+     * clock is wrong, so here it is allowed. Only the system clock: the
+     * hardware clock on a Windows machine keeps local time, which this side
+     * cannot know, so writing it is left to an explicit hwclock --localtime
+     * from a session that does.
+     */
+    struct timespec ts;
+
+    if (secs > (uint64_t)INT32_MAX && sizeof(time_t) < 8)
+        return wl_fail(WL_ERR_INVAL, "clock: %llu is past what time_t holds here",
+                       (unsigned long long)secs);
+    ts.tv_sec = (time_t)secs;
+    ts.tv_nsec = 0;
+    if (clock_settime(CLOCK_REALTIME, &ts) != 0)
+        return wl_fail(WL_ERR_IO, "clock: %s", strerror(errno));
+    return WL_OK;
+#else
     /*
      * Refused on purpose, not for want of an implementation. This backend is
      * the client and the tested agent, neither of which has any business
@@ -52,4 +74,5 @@ wl_status wl_clock_set_utc(uint64_t secs)
      */
     (void)secs;
     return wl_fail(WL_ERR_INVAL, "setting the clock is not supported on this platform");
+#endif
 }

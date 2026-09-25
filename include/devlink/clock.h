@@ -46,9 +46,9 @@ void wl_clock_zone_name(char *buf, size_t cap);
 
 /*
  * Sets the wall clock. Fails with WL_ERR_INVAL where it is not supported,
- * which includes every POSIX build: the client has no business setting its
- * own clock, and the POSIX agent exists to be tested rather than to run a
- * machine, so a test can never move the developer's clock.
+ * which includes every POSIX build but the Linux agent's (DEVLINK_AGENT): the
+ * client has no business setting its own clock, and the agent the tests run
+ * is built without it, so a test can never move the developer's clock.
  */
 wl_status wl_clock_set_utc(uint64_t secs);
 

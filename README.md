@@ -6,10 +6,12 @@ because the options at that end each miss something: Kermit and Zmodem are
 reliable but barely compress, and Windows' PPP compression (MPPC) is not
 something Linux pppd speaks.
 
-Two programs share one protocol core:
+Three programs share one protocol core:
 
 - `devlink`, the Linux client
 - `DEVLINK.EXE`, the Win32 agent, cross-built with Open Watcom
+- `devlink-agent`, the same agent for Linux, statically linked, for a rescue
+  image that boots on a machine whose own OS will not (Manual section 5)
 
 The target is **Windows 2000**. Windows 98 SE and NT 4.0 still work and the
 code for them is kept, but nothing is verified on them any more; see
