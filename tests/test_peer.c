@@ -307,6 +307,29 @@ static void test_reject(void **state)
     assert_int_equal(wl_peer_open(cli.peer, WL_KIND_EXEC, NULL, 0, &ch), WL_OK);
 }
 
+/*
+ * An OPEN closed rather than answered. The opener used to ignore the CLOSE,
+ * since it was waiting for OPEN_OK or OPEN_FAIL, and waited for ever; a
+ * multiplexer whose line restarted under a pending OPEN did exactly this.
+ */
+static void test_close_instead_of_an_answer_is_a_refusal(void **state)
+{
+    uint16_t ch;
+    const struct event *e;
+
+    (void)state;
+    assert_true(run_until(both_ready, 5000));
+    assert_int_equal(wl_peer_open(cli.peer, WL_KIND_EXEC, NULL, 0, &ch), WL_OK);
+    assert_true(run_until(srv_saw_open, 5000));
+    assert_int_equal(wl_peer_close(srv.peer, ch), WL_OK);
+    assert_true(run_until(cli_saw_answer, 5000));
+    e = last(&cli, 'a');
+    assert_int_equal(e->type, 0);
+    assert_int_equal(e->code, WL_E_UNKNOWN);
+    /* And the number is free again rather than held by a dead channel. */
+    assert_int_equal(wl_peer_open(cli.peer, WL_KIND_EXEC, NULL, 0, &ch), WL_OK);
+}
+
 static uint64_t bulk_target;
 
 static int bulk_done(void)
@@ -480,6 +503,8 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_handshake, setup, teardown),
         cmocka_unit_test_setup_teardown(test_open_records_close, setup, teardown),
         cmocka_unit_test_setup_teardown(test_reject, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_close_instead_of_an_answer_is_a_refusal, setup,
+                                        teardown),
         cmocka_unit_test_setup_teardown(test_interactive_channel_is_not_starved, setup,
                                         teardown),
         cmocka_unit_test_setup_teardown(test_large_transfer_replenishes_credit, setup,

@@ -608,6 +608,22 @@ The log is the first place to look when something is odd. It records each
 client connecting and leaving, each session on the line, and the number of
 channels held, which should return to zero between commands.
 
+**Across an agent update.** When the agent accepts `@stop`, the multiplexer
+treats the line as down until the next agent says hello: a command sent in the
+gap, as an update's next command always is, waits for the new agent and runs
+there, and `info` reports the new build rather than the old one. If no agent
+comes back (an `@stop` with nothing to replace it), those commands fail after
+15 seconds with "the line did not come up". Before this, a command sent in the
+gap went to the agent that had just left and its client waited for ever.
+
+An agent that goes without `@stop` (it crashed, or was restarted by hand) gives
+no warning, so a command whose OPEN reaches it in the gap cannot be saved. When
+the next agent's session starts, that command fails with "the agent restarted
+before it answered; the command may have started, so check before running it
+again". It is not resent, since the old agent may have started it before it
+went, and running an installer or a `del` twice is worse than a failure you can
+repeat.
+
 **What it deliberately does not do.** A channel dies with its client. Ctrl-C or
 a closed terminal kills the remote command exactly as it does without the
 multiplexer. It gives concurrency, not detachment: keeping a command alive

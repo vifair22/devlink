@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
@@ -43,6 +44,17 @@ static struct {
      * and a client wins that race easily; over a pty it takes almost none, so
      * the race has to be made rather than hoped for. */
     volatile int agent_delay_ms;
+    /*
+     * An agent that comes back after it stops, as the launchers on the real
+     * targets do: AGENT.BAT, DEVLINKW's self-update, init's respawn. Each
+     * life has its own seed, so its link id differs and the multiplexer sees
+     * a restarted peer, not the same one resuming. agent_leave ends a life
+     * without @stop, which the multiplexer cannot see coming.
+     */
+    volatile int agent_restarts;
+    volatile int agent_gap_ms;
+    volatile int agent_leave;
+    volatile int agent_lives;
     pthread_t agent_th;
     pthread_t mux_th;
     wl_status agent_result;
@@ -55,12 +67,28 @@ static int should_stop(void *ctx)
     return h.stop;
 }
 
+static int agent_should_stop(void *ctx)
+{
+    (void)ctx;
+    return h.stop || h.agent_leave;
+}
+
 static void *agent_main(void *arg)
 {
+    uint32_t seed = 0x51A7EU;
+
     (void)arg;
     if (h.agent_delay_ms > 0)
         (void)poll(NULL, 0, h.agent_delay_ms);
-    h.agent_result = wl_agent_serve(&h.agent_t, &h.agent_cfg, 0x51A7EU);
+    for (;;) {
+        h.agent_result = wl_agent_serve(&h.agent_t, &h.agent_cfg, seed++);
+        h.agent_lives++;
+        if (h.stop || h.agent_restarts == 0)
+            break;
+        h.agent_restarts--;
+        (void)poll(NULL, 0, h.agent_gap_ms);
+        h.agent_leave = 0;
+    }
     return NULL;
 }
 
@@ -92,7 +120,7 @@ static int setup_common(int agent_delay_ms)
 
     h.agent_cfg.session = fast_session();
     h.agent_cfg.platform = WL_PLATFORM_LINUX;
-    h.agent_cfg.stop = should_stop;
+    h.agent_cfg.stop = agent_should_stop;
     h.mux_cfg.session = fast_session();
     h.mux_cfg.socket_path = h.sock;
     h.mux_cfg.stop = should_stop;
@@ -185,6 +213,23 @@ static void *run_job(void *arg)
     }
     j->done_ms = wl_clock_ms();
     return NULL;
+}
+
+/* A job that has not finished in time is a hang, which is what these tests
+ * are about; failing beats joining for ever. */
+static void join_within(struct job *j, unsigned ms)
+{
+    struct timespec until;
+
+    assert_int_equal(clock_gettime(CLOCK_REALTIME, &until), 0);
+    until.tv_sec += (time_t)(ms / 1000U);
+    until.tv_nsec += (long)(ms % 1000U) * 1000000L;
+    if (until.tv_nsec >= 1000000000L) {
+        until.tv_sec++;
+        until.tv_nsec -= 1000000000L;
+    }
+    if (pthread_timedjoin_np(j->th, NULL, &until) != 0)
+        fail_msg("'%s' was still waiting after %u ms", j->cmd, ms);
 }
 
 /* The multiplexer needs its line session up before a client can be served. */
@@ -480,6 +525,87 @@ static void test_a_large_compressible_transfer_loses_nothing(void **state)
  * started a second multiplexer, which then could not open the port the first
  * one was holding.
  */
+/*
+ * A command sent the moment @stop returns, as an update does: put the new
+ * binary, @stop, then carry on. The agent is gone before the link can say
+ * so, and the multiplexer used to relay the command to it; when the new agent
+ * appeared the channel was closed under a client still waiting for its OPEN
+ * to be answered, and the client waited for ever (2026-09-26, on the A21m).
+ * Now the multiplexer holds it for the new agent, which runs it.
+ */
+static void test_a_command_straight_after_stop_runs_on_the_next_agent(void **state)
+{
+    struct wl_session_cfg cfg = local_session();
+    struct wl_transport t;
+    struct wl_exec_result r;
+    struct capture cap;
+    struct wl_exec_io io = {&cap, on_output, NULL, NULL};
+    struct job after;
+
+    (void)state;
+    memset(&cap, 0, sizeof(cap));
+    h.agent_restarts = 1;
+    h.agent_gap_ms = 300;
+    wait_for_the_line();
+    memset(&r, 0, sizeof(r));
+    assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+    assert_int_equal(wl_client_exec(&t, &cfg, 4040, "@stop", NULL, 0, &io, 5000, &r), WL_OK);
+    wl_transport_close(&t);
+    assert_true(r.ran);
+    assert_int_equal(r.exit_code, 0);
+
+    memset(&after, 0, sizeof(after));
+    after.cmd = "echo after";
+    assert_int_equal(pthread_create(&after.th, NULL, run_job, &after), 0);
+    join_within(&after, 10000);
+    assert_int_equal(after.st, WL_OK);
+    assert_true(after.r.ran);
+    assert_int_equal(after.r.exit_code, 0);
+    assert_int_equal(after.cap.len, 6);
+    assert_memory_equal(after.cap.out, "after\n", 6);
+    assert_int_equal(h.agent_lives, 1); /* the second agent is the one serving */
+}
+
+/*
+ * The case the multiplexer cannot see coming: the agent goes without @stop
+ * (a crash, a restart by hand) and a command's OPEN goes to it. When the next
+ * agent's session starts, that command must fail and say why, not hang; and
+ * the line must serve the next command as usual.
+ */
+static void test_an_open_lost_to_a_restart_fails_rather_than_hangs(void **state)
+{
+    struct job lost;
+    struct job next;
+    uint32_t start;
+
+    (void)state;
+    h.agent_restarts = 1;
+    h.agent_gap_ms = 500;
+    wait_for_the_line();
+    h.agent_leave = 1;
+    start = wl_clock_ms();
+    while (h.agent_lives == 0 && wl_clock_since(start) < 5000U)
+        (void)poll(NULL, 0, 5);
+    assert_int_equal(h.agent_lives, 1);
+
+    memset(&lost, 0, sizeof(lost));
+    lost.cmd = "echo lost";
+    assert_int_equal(pthread_create(&lost.th, NULL, run_job, &lost), 0);
+    join_within(&lost, 10000);
+    assert_int_equal(lost.st, WL_OK);
+    assert_false(lost.r.ran);
+    assert_non_null(strstr(lost.r.message, "restarted"));
+
+    memset(&next, 0, sizeof(next));
+    next.cmd = "echo next";
+    assert_int_equal(pthread_create(&next.th, NULL, run_job, &next), 0);
+    join_within(&next, 10000);
+    assert_int_equal(next.st, WL_OK);
+    assert_true(next.r.ran);
+    assert_int_equal(next.cap.len, 5);
+    assert_memory_equal(next.cap.out, "next\n", 5);
+}
+
 static void test_two_names_for_one_line_share_a_socket(void **state)
 {
     char target[128];
@@ -533,6 +659,10 @@ int main(void)
         cmocka_unit_test_setup_teardown(
             test_a_connection_that_closes_at_once_does_not_kill_the_multiplexer, setup,
             teardown),
+        cmocka_unit_test_setup_teardown(test_a_command_straight_after_stop_runs_on_the_next_agent,
+                                        setup, teardown),
+        cmocka_unit_test_setup_teardown(test_an_open_lost_to_a_restart_fails_rather_than_hangs,
+                                        setup, teardown),
         cmocka_unit_test_setup_teardown(test_a_large_compressible_transfer_loses_nothing, setup,
                                         teardown),
         cmocka_unit_test_setup_teardown(

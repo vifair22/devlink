@@ -332,6 +332,21 @@ static void on_control(struct wl_peer *p, uint8_t type, const uint8_t *pl, size_
             break;
         if (c == NULL)
             return; /* both sides closed at once; the number is already free */
+        if (c->state == CH_OPENING) {
+            /*
+             * Closed instead of answered. The protocol lets the side that
+             * received an OPEN close it without accepting it, and a
+             * multiplexer whose line restarted used to do exactly that. The
+             * opener waits for an answer, and a CLOSE is not one, so it
+             * waited for ever. It is taken as a refusal.
+             */
+            static const char msg[] = "the channel was closed before it was answered";
+
+            free_chan(p, c);
+            if (p->h.opened != NULL)
+                p->h.opened(p->h.ctx, id, 0, WL_E_UNKNOWN, msg, sizeof(msg) - 1);
+            return;
+        }
         c->peer_closed = 1;
         if (p->h.closed != NULL)
             p->h.closed(p->h.ctx, id);

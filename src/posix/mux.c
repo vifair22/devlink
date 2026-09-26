@@ -63,6 +63,7 @@ struct pair {
      * resynchronising at that moment.
      */
     int waiting;
+    int is_stop;     /* an @stop: once the agent accepts it, it is leaving */
     int up_closed;   /* the agent closed its end */
     int down_closed; /* the client closed its end */
     /*
@@ -253,13 +254,32 @@ static void up_session(void *ctx)
      * own sessions are untouched, but their commands are not coming back, so
      * each is told its channel has closed and left to report that as it sees
      * fit.
+     *
+     * Two kinds are not closed. One held for the line never reached it, so it
+     * stays held and opens on the new session. One whose OPEN went up but was
+     * never answered has not been accepted on the client's side either, and a
+     * client waiting for an answer does not take a CLOSE as one: it waited for
+     * ever, which is how a command sent just after @stop hung (2026-09-26). It
+     * is refused instead, saying the command may have started, since the old
+     * agent may have received the OPEN before it went.
      */
     m->up_ready = 0;
     for (unsigned i = 0; i < MUX_PAIRS; i++) {
         struct pair *p = &m->pairs[i];
 
-        if (!p->used)
+        if (!p->used || p->waiting)
             continue;
+        if (p->pending) {
+            struct client *c = pair_client(m, p);
+
+            if (c != NULL)
+                (void)wl_peer_reject(c->peer, p->local, WL_E_UNKNOWN,
+                                     "the agent restarted before it answered; the "
+                                     "command may have started, so check before "
+                                     "running it again");
+            pair_free(p);
+            continue;
+        }
         /* The upstream channels went with the session, so there is nothing
          * left to close over there and no number to hold. The client's side
          * still has to be closed, and try_finish will keep trying. */
@@ -291,6 +311,18 @@ static void up_opened(void *ctx, uint16_t ch, int ok, uint16_t code, const char 
         return;
     p->pending = 0;
     p->up_open = ok ? 1 : 0;
+    if (ok && p->is_stop) {
+        /*
+         * The agent accepted @stop, so it is about to leave, and the link
+         * will not say so until a replacement announces itself. Anything
+         * relayed in that gap goes to an agent that is gone. Treating the
+         * line as down from here holds new clients and their commands until
+         * the next agent's HELLO, and gives up on them after
+         * WAIT_FOR_LINE_MS if none comes, as for any line that is down.
+         */
+        m->up_ready = 0;
+        log_line(m, "line: the agent is stopping; holding new commands for the next one", "");
+    }
     if (pair_client(m, p) == NULL) {
         /* Its client left while the agent was deciding; the channel it just
          * granted has to be handed back. */
@@ -420,6 +452,21 @@ static void up_error(void *ctx, uint16_t code, const char *msg, size_t n)
  * handlers on a client's socket
  * ------------------------------------------------------------------------- */
 
+/* Whether an OPEN is an exec of @stop, the one command that ends the agent.
+ * The agent matches the whole command exactly, and so does this. */
+static int is_stop(uint8_t kind, const uint8_t *args, size_t n)
+{
+    struct wl_rbuf r;
+    const char *cmd;
+    size_t len;
+
+    if (kind != WL_KIND_EXEC)
+        return 0;
+    wl_rbuf_init(&r, args, n);
+    cmd = wl_r_str(&r, &len);
+    return !r.bad && len == 5 && memcmp(cmd, "@stop", 5) == 0;
+}
+
 static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args, size_t n)
 {
     struct client *c = ctx;
@@ -439,6 +486,7 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
     p->client = c->index;
     p->client_serial = c->serial;
     p->local = ch;
+    p->is_stop = is_stop(kind, args, n);
     if (!m->up_ready) {
         p->args = malloc(n > 0 ? n : 1);
         if (p->args == NULL) {
