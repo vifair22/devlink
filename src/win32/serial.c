@@ -9,11 +9,59 @@
  * Win32 serial transport, synchronous I/O. Overlapped I/O on comm handles
  * works on both 9x and NT, but nothing needs it yet: the read timeout below
  * gives the caller its tick, which is all the link layer asks for.
+ *
+ * A port that fails is reopened rather than reported. After a standby or
+ * hibernate, Windows 2000's serial.sys answers every call on a handle opened
+ * before it with ERROR_INVALID_FUNCTION (seen on the A21m, 2026-09-26), while
+ * a fresh open of the same port works. Returning the error would end the
+ * agent's session and every command running under it; instead the handle is
+ * closed, reopened with the same settings, and the gap looks to the link
+ * layer like a line that went quiet, which it already recovers from by
+ * retransmitting. A port that will not reopen (a USB adapter unplugged, or
+ * another program holding it) is retried every REOPEN_MS for as long as it
+ * takes. The count and the last error are in the caps output.
  */
+#define REOPEN_MS 1000U
+
 struct com_impl {
-    HANDLE h;
-    DWORD read_timeout; /* last value given to SetCommTimeouts */
+    HANDLE h;           /* INVALID_HANDLE_VALUE while the port is lost */
+    DWORD read_timeout; /* last value given to SetCommTimeouts; 0 after an open */
+    char path[64];
+    uint32_t baud;
+    DWORD lost_at;       /* GetTickCount of the last failed reopen */
+    unsigned long lost;  /* times the port has been lost */
+    DWORD last_error;    /* the error that lost it most recently */
 };
+
+static wl_status open_port(const char *path, uint32_t baud, HANDLE *out);
+
+/* The port has failed: drop the handle, so the next read reopens it. */
+static void lose(struct com_impl *c)
+{
+    c->last_error = GetLastError();
+    c->lost++;
+    CloseHandle(c->h);
+    c->h = INVALID_HANDLE_VALUE;
+    c->lost_at = GetTickCount() - REOPEN_MS; /* the first reopen is immediate */
+}
+
+/* Nonzero when the port is open, reopening it if the last try is REOPEN_MS
+ * old. A failed reopen leaves its message in the error buffer, which nothing
+ * reads: the caller reports a quiet line, not an error. */
+static int have_port(struct com_impl *c)
+{
+    if (c->h != INVALID_HANDLE_VALUE)
+        return 1;
+    if (GetTickCount() - c->lost_at < REOPEN_MS)
+        return 0;
+    if (open_port(c->path, c->baud, &c->h) != WL_OK) {
+        c->h = INVALID_HANDLE_VALUE;
+        c->lost_at = GetTickCount();
+        return 0;
+    }
+    c->read_timeout = 0;
+    return 1;
+}
 
 /* ReadIntervalTimeout = ReadTotalTimeoutMultiplier = MAXDWORD with a finite
  * constant is the documented combination for "return as soon as any byte is
@@ -45,10 +93,15 @@ static wl_status com_read(void *impl, uint8_t *buf, size_t cap, size_t *got,
     DWORD n = 0;
 
     *got = 0;
-    if (!set_read_timeout(c, (DWORD)timeout_ms))
-        return wl_fail(WL_ERR_IO, "serial: SetCommTimeouts failed (%lu)", GetLastError());
-    if (!ReadFile(c->h, buf, (DWORD)cap, &n, NULL))
-        return wl_fail(WL_ERR_IO, "serial: ReadFile failed (%lu)", GetLastError());
+    if (!have_port(c)) {
+        /* Keep the caller's tick while there is no port to wait on. */
+        Sleep(timeout_ms > REOPEN_MS ? REOPEN_MS : (DWORD)timeout_ms);
+        return WL_OK;
+    }
+    if (!set_read_timeout(c, (DWORD)timeout_ms) || !ReadFile(c->h, buf, (DWORD)cap, &n, NULL)) {
+        lose(c);
+        return WL_OK;
+    }
     *got = (size_t)n;
     return WL_OK;
 }
@@ -57,12 +110,18 @@ static wl_status com_write(void *impl, const uint8_t *buf, size_t len)
 {
     struct com_impl *c = impl;
 
+    /* Bytes written to a lost port are dropped, as a noisy line would drop
+     * them; the link layer resends what the peer does not acknowledge. */
+    if (!have_port(c))
+        return WL_OK;
     while (len > 0) {
         DWORD n = 0;
         DWORD chunk = len > 0x10000U ? 0x10000U : (DWORD)len;
 
-        if (!WriteFile(c->h, buf, chunk, &n, NULL))
-            return wl_fail(WL_ERR_IO, "serial: WriteFile failed (%lu)", GetLastError());
+        if (!WriteFile(c->h, buf, chunk, &n, NULL)) {
+            lose(c);
+            return WL_OK;
+        }
         if (n == 0)
             return wl_fail(WL_ERR_IO, "serial: WriteFile wrote nothing");
         buf += n;
@@ -75,7 +134,8 @@ static void com_close(void *impl)
 {
     struct com_impl *c = impl;
 
-    CloseHandle(c->h);
+    if (c->h != INVALID_HANDLE_VALUE)
+        CloseHandle(c->h);
     free(c);
 }
 
@@ -121,6 +181,9 @@ static wl_status com_caps(void *impl, char *out, size_t cap)
     size_t at = 0;
     size_t n;
 
+    if (!have_port(c))
+        return wl_fail(WL_ERR_IO, "caps: %s is lost (error %lu), reopening", c->path,
+                       c->last_error);
     memset(&pr, 0, sizeof(pr));
     pr.wPacketLength = sizeof(pr);
     if (!GetCommProperties(c->h, &pr))
@@ -139,6 +202,9 @@ static wl_status com_caps(void *impl, char *out, size_t cap)
                            pr.dwCurrentRxQueue, pr.dwCurrentTxQueue);
     at = add_rates(buf, at, sizeof(buf), "maxbaud", pr.dwMaxBaud);
     at = add_rates(buf, at, sizeof(buf), "settable", pr.dwSettableBaud);
+    if (at < sizeof(buf))
+        at += (size_t)snprintf(buf + at, sizeof(buf) - at, "reopened %lu (last error %lu)\n",
+                               c->lost, c->last_error);
     if (at >= sizeof(buf))
         return wl_fail(WL_ERR_NOSPACE, "caps: description did not fit");
     n = strlen(buf);
@@ -153,9 +219,8 @@ static wl_status com_caps(void *impl, char *out, size_t cap)
 static const struct wl_transport_ops com_ops = {com_read, com_write, com_close, com_caps,
                                                 NULL};
 
-wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *out)
+static wl_status open_port(const char *path, uint32_t baud, HANDLE *out)
 {
-    struct com_impl *c;
     DCB dcb;
     HANDLE h;
 
@@ -198,14 +263,27 @@ wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *o
         return st;
     }
     (void)PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR | PURGE_RXABORT | PURGE_TXABORT);
+    *out = h;
+    return WL_OK;
+}
 
-    c = malloc(sizeof(*c));
-    if (c == NULL) {
-        CloseHandle(h);
+wl_status wl_serial_open(const char *path, uint32_t baud, struct wl_transport *out)
+{
+    struct com_impl *c;
+    wl_status st;
+
+    if (strlen(path) >= sizeof(c->path))
+        return wl_fail(WL_ERR_INVAL, "serial: port name too long: %s", path);
+    c = calloc(1, sizeof(*c));
+    if (c == NULL)
         return wl_fail(WL_ERR_NOMEM, "serial: out of memory");
+    st = open_port(path, baud, &c->h);
+    if (st != WL_OK) {
+        free(c);
+        return st;
     }
-    c->h = h;
-    c->read_timeout = 0;
+    memcpy(c->path, path, strlen(path) + 1);
+    c->baud = baud;
     out->ops = &com_ops;
     out->impl = c;
     return WL_OK;

@@ -396,7 +396,12 @@ subtype RS232
 buffers rx 16384 tx 0
 maxbaud any (BAUD_USER)
 settable 75 110 ... 57600 115200 any (BAUD_USER)
+reopened 0 (last error 0)
 ```
+
+`reopened` counts the times the agent has lost the port and opened it again,
+with the Windows error that lost it most recently (see *Standby and
+hibernate* in section 10).
 
 Ask this before changing how the line is driven. A settable list that stops at
 115200 with `any (BAUD_USER)` after it, which is what the A21m reports, means
@@ -741,6 +746,18 @@ DEVLINK_DEBUG=1 devlink sync ./src C:/SRC/src
 | Everything stalls, then recovers after ten seconds | the link declared the peer dead and resynchronised; look for a loose connector |
 
 ## 10. Limits and known behaviour
+
+**Standby and hibernate.** After a resume, Windows 2000's serial driver fails
+every call on a port handle opened before the suspend, with error 1
+(`ERROR_INVALID_FUNCTION`); a fresh open works. Agents before this change
+stopped with `serial: SetCommTimeouts failed (1)` and had to be restarted by
+hand. The agent now closes a failed port and reopens it, once a second until it
+succeeds, and says nothing to the link meanwhile: the session, running
+commands and transfers carry on, and the client sees a pause that the link
+recovers from by retransmitting. A suspend longer than the client's patience
+ends that client's session in the ordinary way; the agent keeps serving and the
+next client connects. `@caps` shows how many times the port has been reopened.
+The same path covers a USB serial adapter unplugged and plugged back in.
 
 **Exit codes on Windows 9x.** `command.com` always exits with 0, whatever the
 program it ran returned. The agent therefore runs a command directly when it
