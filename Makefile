@@ -49,7 +49,7 @@ AGENTW_SOURCES := $(AGENTW_ENTRY) $(AGENT_SHARED)
 # The Linux agent: the same core over the POSIX layer, minus what only the
 # client uses (the multiplexer and its socket).
 LINUX_AGENT_SOURCES := $(CORE_SOURCES) $(SRC_DIR)/linux/main.c \
-                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c serial.c)
+                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c random.c serial.c)
 
 # Vendored zlib: built once with its own flags into an archive, never subject
 # to this project's warnings, analysis or coverage (third_party/zlib/VENDORED.md).
@@ -57,6 +57,15 @@ ZLIB_DIR     := third_party/zlib
 ZLIB_SOURCES := $(addprefix $(ZLIB_DIR)/,adler32.c crc32.c deflate.c inffast.c \
                 inflate.c inftrees.c trees.c zutil.c)
 ZLIB_LIB     := $(BUILD_DIR)/zlib/libz.a
+
+# Vendored Monocypher, for X25519 and ChaCha20-Poly1305 under the TCP link's
+# Noise handshake. Treated exactly as zlib is (third_party/monocypher/VENDORED.md).
+MONO_DIR     := third_party/monocypher
+MONO_SOURCES := $(MONO_DIR)/monocypher.c
+MONO_LIB     := $(BUILD_DIR)/monocypher/libmonocypher.a
+
+# Every native link takes both archives.
+VENDOR_LIBS  := $(ZLIB_LIB) $(MONO_LIB)
 
 # Tests link the core and the POSIX platform layer, never the client's main().
 LIB_SOURCES    := $(CORE_SOURCES) $(wildcard $(SRC_DIR)/posix/*.c)
@@ -71,8 +80,9 @@ WARNINGS := -Wall -Wextra -Wpedantic -Wshadow -Wunused -Wunused-function \
 
 HARDENING := -fstack-protector-strong -fstack-clash-protection
 
-# -isystem, so zlib.h is held to system-header rules rather than ours.
-CPPFLAGS_COMMON := -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_GNU_SOURCE \
+# -isystem, so zlib.h and monocypher.h are held to system-header rules rather
+# than ours.
+CPPFLAGS_COMMON := -I$(INC_DIR) -isystem $(ZLIB_DIR) -isystem $(MONO_DIR) -D_GNU_SOURCE \
                    -DDEVLINK_VERSION='"$(VERSION)_$(BUILD_ID).$(VARIANT)"'
 CFLAGS_COMMON   := -std=c11 $(WARNINGS) $(HARDENING) -Werror
 
@@ -103,8 +113,8 @@ OBJECTS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(NATIVE_SOURCES))
 
 variant: $(OUT)
 
-$(OUT): $(OBJECTS) $(ZLIB_LIB) | $(BIN_DIR)
-	$(CC) $(CFLAGS_COMMON) $(VARIANT_FLAGS) -o $@ $(OBJECTS) $(ZLIB_LIB)
+$(OUT): $(OBJECTS) $(VENDOR_LIBS) | $(BIN_DIR)
+	$(CC) $(CFLAGS_COMMON) $(VARIANT_FLAGS) -o $@ $(OBJECTS) $(VENDOR_LIBS)
 
 ZLIB_OBJECTS := $(patsubst $(ZLIB_DIR)/%.c,$(BUILD_DIR)/zlib/%.o,$(ZLIB_SOURCES))
 
@@ -115,6 +125,16 @@ $(ZLIB_LIB): $(ZLIB_OBJECTS)
 $(BUILD_DIR)/zlib/%.o: $(ZLIB_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -w -I$(ZLIB_DIR) -c $< -o $@
+
+MONO_OBJECTS := $(patsubst $(MONO_DIR)/%.c,$(BUILD_DIR)/monocypher/%.o,$(MONO_SOURCES))
+
+$(MONO_LIB): $(MONO_OBJECTS)
+	@rm -f $@
+	ar rcs $@ $(MONO_OBJECTS)
+
+$(BUILD_DIR)/monocypher/%.o: $(MONO_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -w -I$(MONO_DIR) -c $< -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -178,6 +198,9 @@ $(WAT_RES): $(SRC_DIR)/agent/devlink.rc $(WAT_ICON) release_version
 
 WAT_ZLIB_FLAGS := -q -bt=nt -za99 -w0 -ox -I$(ZLIB_DIR)
 WAT_ZLIB_OBJS  := $(patsubst $(ZLIB_DIR)/%.c,$(WAT_DIR)/zlib/%.obj,$(ZLIB_SOURCES))
+WAT_MONO_FLAGS := -q -bt=nt -za99 -w0 -ox -I$(MONO_DIR)
+WAT_MONO_OBJS  := $(patsubst $(MONO_DIR)/%.c,$(WAT_DIR)/monocypher/%.obj,$(MONO_SOURCES))
+WAT_VENDOR_OBJS := $(WAT_ZLIB_OBJS) $(WAT_MONO_OBJS)
 
 $(WAT_DIR)/zlib/%.obj: $(ZLIB_DIR)/%.c
 	@test -x $(WATCOM)/binl64/wcl386 || { \
@@ -185,10 +208,16 @@ $(WAT_DIR)/zlib/%.obj: $(ZLIB_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(WAT_ENV) wcl386 -c $(WAT_ZLIB_FLAGS) -fo=$@ $<
 
-$(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) $(WAT_RES) | $(BIN_DIR)
+$(WAT_DIR)/monocypher/%.obj: $(MONO_DIR)/%.c
+	@test -x $(WATCOM)/binl64/wcl386 || { \
+	    echo "Open Watcom not found at $(WATCOM); set WATCOM=" >&2; exit 1; }
+	@mkdir -p $(dir $@)
+	$(WAT_ENV) wcl386 -c $(WAT_MONO_FLAGS) -fo=$@ $<
+
+$(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_VENDOR_OBJS) $(WAT_RES) | $(BIN_DIR)
 	@mkdir -p $(WAT_DIR)
-	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt -I$(ZLIB_DIR) -fo=$(WAT_DIR)/ -fe=$@ \
-	    $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS)
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt -I$(ZLIB_DIR) -I$(MONO_DIR) -fo=$(WAT_DIR)/ -fe=$@ \
+	    $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_VENDOR_OBJS)
 	$(WAT_ENV) wrc -q -bt=nt $(WAT_RES) $@
 	@chmod 755 $@
 
@@ -197,10 +226,10 @@ $(AGENT): $(CORE_SOURCES) $(AGENT_SOURCES) $(WAT_ZLIB_OBJS) $(WAT_RES) | $(BIN_D
 # their own directory: the same core file compiled for either front end has the
 # same object name, and sharing the directory would mean each build overwriting
 # the other's and neither being rebuilt when only the entry file changed.
-$(AGENTW): $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_ZLIB_OBJS) $(WAT_RES) | $(BIN_DIR)
+$(AGENTW): $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_VENDOR_OBJS) $(WAT_RES) | $(BIN_DIR)
 	@mkdir -p $(WAT_DIR)/win
-	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt_win -I$(ZLIB_DIR) -fo=$(WAT_DIR)/win/ -fe=$@ \
-	    $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_ZLIB_OBJS)
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt_win -I$(ZLIB_DIR) -I$(MONO_DIR) -fo=$(WAT_DIR)/win/ -fe=$@ \
+	    $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_VENDOR_OBJS)
 	$(WAT_ENV) wrc -q -bt=nt $(WAT_RES) $@
 	@chmod 755 $@
 
@@ -219,10 +248,11 @@ LINUX_AGENT      := $(BIN_DIR)/devlink-agent
 LINUX_AGENT_DIR  := $(BUILD_DIR)/linux-agent
 LINUX_AGENT_ARCH ?=
 LINUX_AGENT_CFLAGS := $(LINUX_AGENT_ARCH) -DDEVLINK_AGENT
-LINUX_AGENT_CPPFLAGS := -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_GNU_SOURCE \
+LINUX_AGENT_CPPFLAGS := -I$(INC_DIR) -isystem $(ZLIB_DIR) -isystem $(MONO_DIR) -D_GNU_SOURCE \
                         -DDEVLINK_VERSION='"$(VERSION)_$(BUILD_ID).linux"'
 LINUX_AGENT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(LINUX_AGENT_DIR)/%.o,$(LINUX_AGENT_SOURCES)) \
-                    $(patsubst $(ZLIB_DIR)/%.c,$(LINUX_AGENT_DIR)/zlib/%.o,$(ZLIB_SOURCES))
+                    $(patsubst $(ZLIB_DIR)/%.c,$(LINUX_AGENT_DIR)/zlib/%.o,$(ZLIB_SOURCES)) \
+                    $(patsubst $(MONO_DIR)/%.c,$(LINUX_AGENT_DIR)/monocypher/%.o,$(MONO_SOURCES))
 
 agent-linux: $(LINUX_AGENT)
 
@@ -233,6 +263,10 @@ $(LINUX_AGENT): $(LINUX_AGENT_OBJS) | $(BIN_DIR)
 $(LINUX_AGENT_DIR)/zlib/%.o: $(ZLIB_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) -O2 -w $(LINUX_AGENT_ARCH) -I$(ZLIB_DIR) -c $< -o $@
+
+$(LINUX_AGENT_DIR)/monocypher/%.o: $(MONO_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -w $(LINUX_AGENT_ARCH) -I$(MONO_DIR) -c $< -o $@
 
 $(LINUX_AGENT_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -273,9 +307,9 @@ $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
 	    -pthread -MMD -MP -c $< -o $@
 
-$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(TEST_LIB_OBJS) $(TEST_DEPS) $(ZLIB_LIB) | $(BIN_DIR)
+$(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(TEST_LIB_OBJS) $(TEST_DEPS) $(VENDOR_LIBS) | $(BIN_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
-	    -pthread -I$(TEST_DIR) -o $@ $< $(TEST_LIB_OBJS) $(ZLIB_LIB) -lcmocka
+	    -pthread -I$(TEST_DIR) -o $@ $< $(TEST_LIB_OBJS) $(VENDOR_LIBS) -lcmocka
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do \
@@ -315,10 +349,10 @@ $(COV_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -pthread -MMD -MP -c $< -o $@
 
-$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(COV_LIB_OBJS) $(TEST_DEPS) $(ZLIB_LIB)
+$(BUILD_DIR)/coverage/test_%: $(TEST_DIR)/test_%.c $(COV_LIB_OBJS) $(TEST_DEPS) $(VENDOR_LIBS)
 	@mkdir -p $(BUILD_DIR)/coverage
 	$(CC) $(CPPFLAGS_COMMON) -std=c11 $(COVERAGE_FLAGS) -I$(TEST_DIR) \
-	    -pthread -o $@ $< $(COV_LIB_OBJS) $(ZLIB_LIB) -lcmocka
+	    -pthread -o $@ $< $(COV_LIB_OBJS) $(VENDOR_LIBS) -lcmocka
 
 coverage-run: $(COV_BINS)
 	@# Counters from an earlier run, or from an earlier layout of these
@@ -387,7 +421,7 @@ tidy:
 	    echo "== win32"; \
 	    echo $(sort $(AGENT_SOURCES) $(AGENTW_SOURCES)) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
 	        clang-tidy {} -- --target=i686-w64-mingw32 $(WIN_TIDY_INC) \
-	        -I$(INC_DIR) -isystem $(ZLIB_DIR) -D_WIN32_WINNT=0x0500 -DVARIANT=tidy \
+	        -I$(INC_DIR) -isystem $(ZLIB_DIR) -isystem $(MONO_DIR) -D_WIN32_WINNT=0x0500 -DVARIANT=tidy \
 	        -DDEVLINK_VERSION='"0.0.0_tidy"' -std=c11 -Wno-cast-qual; \
 	fi
 
