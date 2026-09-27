@@ -49,7 +49,7 @@ AGENTW_SOURCES := $(AGENTW_ENTRY) $(AGENT_SHARED)
 # The Linux agent: the same core over the POSIX layer, minus what only the
 # client uses (the multiplexer and its socket).
 LINUX_AGENT_SOURCES := $(CORE_SOURCES) $(SRC_DIR)/linux/main.c \
-                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c serial.c)
+                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c serial.c tcp.c)
 
 # Vendored zlib: built once with its own flags into an archive, never subject
 # to this project's warnings, analysis or coverage (third_party/zlib/VENDORED.md).
@@ -251,6 +251,27 @@ $(LINUX_AGENT_DIR)/core/version.o: $(filter-out $(SRC_DIR)/core/version.c,$(LINU
 .PHONY: gui-preview
 gui-preview: $(AGENTW)
 	@tools/gui-preview.sh $(BUILD_DIR)/preview/agent.png
+
+# The Win32 TCP transport, run under Wine: against itself, and against the
+# POSIX one in both directions. One test program, tools/wintcp_check.c, built
+# twice: by Watcom over src/win32/tcp.c and by gcc over src/posix/tcp.c. Like
+# gui-preview it is evidence rather than a gate, and skips itself without Wine.
+WINTCP_DIR    := $(BUILD_DIR)/wintcp
+WINTCP_EXE    := $(WINTCP_DIR)/WINTCP.EXE
+WINTCP_NATIVE := $(WINTCP_DIR)/wintcp
+WINTCP_CORE   := $(addprefix $(SRC_DIR)/core/,status.c tcp_spec.c)
+
+.PHONY: wintcp-check
+wintcp-check: $(WINTCP_EXE) $(WINTCP_NATIVE)
+	@tools/wintcp-check.sh $(WINTCP_EXE) $(WINTCP_NATIVE)
+
+$(WINTCP_EXE): tools/wintcp_check.c $(WINTCP_CORE) $(SRC_DIR)/win32/tcp.c $(SRC_DIR)/win32/clock.c
+	@mkdir -p $(WINTCP_DIR)/obj
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt -fo=$(WINTCP_DIR)/obj/ -fe=$@ $^
+
+$(WINTCP_NATIVE): tools/wintcp_check.c $(WINTCP_CORE) $(SRC_DIR)/posix/tcp.c $(SRC_DIR)/posix/clock.c
+	@mkdir -p $(WINTCP_DIR)
+	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=wintcp $(CFLAGS_COMMON) -O2 -o $@ $^
 
 # ---------------------------------------------------------------------------
 # tests
