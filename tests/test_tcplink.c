@@ -400,7 +400,7 @@ static void socket_ends(struct end *a, struct end *b)
 {
     int sv[2];
 
-    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv), 0);
     open_end(a, sv[0], 1);
     open_end(b, sv[1], 0);
 }

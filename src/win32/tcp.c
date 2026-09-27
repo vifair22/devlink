@@ -19,12 +19,13 @@
  * while something uses it, with no static state here to get wrong across
  * threads.
  *
- * A SOCKET is not a C descriptor on Win32 and cannot be waited on alongside
- * anything that is not a socket, so the fd() operation reports -1. A caller
- * that has to watch several sockets passes them to select() together; note
- * that Winsock's fd_set is a counted array of FD_SETSIZE (64 unless defined
- * larger before winsock.h), not a bitmap, so the limit is on how many sockets
- * one call can wait on, not on their values.
+ * A SOCKET is not a C descriptor on Win32, but it is what select() waits on,
+ * so the fd() operation and wl_tcp_listener_fd report the socket itself, for
+ * wl_wait_any (wait.h) to hand to select() with the others. A SOCKET is an
+ * unsigned handle the width of a pointer; on this 32-bit target its values
+ * are small and fit an int. Winsock's fd_set is a counted array of
+ * FD_SETSIZE (64 unless defined larger before winsock.h), not a bitmap, so
+ * the limit is on how many sockets one call can wait on, not on their values.
  */
 
 #ifdef __WATCOMC__
@@ -183,8 +184,13 @@ static wl_status tcp_caps(void *impl, char *out, size_t cap)
 }
 
 /* No descriptor: see the note at the top. */
+static int tcp_fd(void *impl)
+{
+    return (int)((struct tcp_impl *)impl)->s;
+}
+
 static const struct wl_transport_ops tcp_ops = {tcp_read, tcp_write, tcp_close, tcp_caps,
-                                                NULL};
+                                                tcp_fd};
 
 /* Takes ownership of s and of one WSAStartup reference: on failure both are
  * released. */
@@ -418,8 +424,7 @@ wl_status wl_tcp_accept(struct wl_tcp_listener *l, uint32_t timeout_ms, struct w
 
 int wl_tcp_listener_fd(const struct wl_tcp_listener *l)
 {
-    (void)l;
-    return -1;
+    return (int)l->s;
 }
 
 uint16_t wl_tcp_listener_port(const struct wl_tcp_listener *l)

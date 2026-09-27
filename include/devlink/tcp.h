@@ -64,8 +64,8 @@ wl_status wl_tcp_listen(const char *bind_addr, uint16_t port, struct wl_tcp_list
 wl_status wl_tcp_accept(struct wl_tcp_listener *l, uint32_t timeout_ms, struct wl_transport *out,
                         char *peer, size_t peer_cap);
 
-/* The listening socket to poll, on POSIX. -1 on Win32, where a socket is not
- * a descriptor. */
+/* The listening socket, to wait on with wl_wait_any (wait.h): a descriptor on
+ * POSIX, the SOCKET on Win32, where select() takes sockets only. */
 int wl_tcp_listener_fd(const struct wl_tcp_listener *l);
 
 /* The port actually bound, which is the point of asking for port 0. */

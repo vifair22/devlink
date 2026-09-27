@@ -68,7 +68,7 @@ static int self_test(void)
         return 1;
     port = wl_tcp_listener_port(l);
     printf("     bound port %u, listener fd %d\n", (unsigned)port, wl_tcp_listener_fd(l));
-    check(port != 0 && wl_tcp_listener_fd(l) == -1, "a real port, and no descriptor");
+    check(port != 0 && wl_tcp_listener_fd(l) >= 0, "a real port, and its socket to wait on");
 
     start = wl_clock_ms();
     check(wl_tcp_accept(l, 100, &s, peer, sizeof(peer)) == WL_OK && s.ops == NULL,
@@ -84,7 +84,7 @@ static int self_test(void)
         return 1;
     printf("     peer %s\n", peer);
     check(strncmp(peer, "127.0.0.1:", 10) == 0, "peer is a.b.c.d:port");
-    check(wl_transport_fd(&s) == -1, "transport has no descriptor");
+    check(wl_transport_fd(&s) >= 0, "the transport reports its socket");
     check(wl_transport_caps(&s, caps, sizeof(caps)) == WL_OK, "caps");
     printf("%s", caps);
     check(strncmp(caps, "transport tcp\npeer 127.0.0.1:", 29) == 0 &&

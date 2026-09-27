@@ -18,11 +18,21 @@
 #include "devlink/agent.h"
 #include "devlink/client_exec.h"
 #include "devlink/proto.h"
+#ifdef EXEC_OVER_TCP
+#include <sys/socket.h>
+
+#include "devlink/posix_fd.h"
+#include "devlink/tcplink.h"
+#endif
 
 /*
  * EXEC end to end: the real agent loop (with the POSIX process backend) in a
  * thread, the real client, and a pty between them. Everything the A21m runs
  * except the Win32 process code.
+ *
+ * test_exec_tcp.c compiles this same file with EXEC_OVER_TCP: the agent then
+ * serves TCP only, with a key, and every new session gets a new connection,
+ * handed to it as a socketpair. new_line() is where the two differ.
  */
 
 struct agent_thread {
@@ -35,6 +45,50 @@ struct agent_thread {
 
 static struct agent_thread agent;
 static struct wl_transport client_t;
+/* The line the current test's own peer runs on. */
+static struct wl_transport *line;
+
+#ifdef EXEC_OVER_TCP
+static const uint8_t key[32] = {0x7e, 0x57};
+static int pending_fd = -1; /* the agent's end of the next connection */
+static int bell[2];
+static struct wl_agent_listener listener;
+static struct wl_tcplink_cfg client_link;
+
+static wl_status one_accept(void *ctx, struct wl_transport *out, char *peer, size_t cap)
+{
+    char b;
+
+    (void)ctx;
+    if (pending_fd < 0)
+        return WL_OK;
+    (void)read(bell[0], &b, 1);
+    (void)snprintf(peer, cap, "127.0.0.1:%d", pending_fd);
+    assert_int_equal(wl_fd_transport(pending_fd, out), WL_OK);
+    pending_fd = -1;
+    return WL_OK;
+}
+
+/* A new connection for a new session, the previous one closed: over TCP a
+ * session is its connection. */
+static struct wl_transport *new_line(void)
+{
+    int sv[2];
+
+    wl_transport_close(&client_t);
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv), 0);
+    pending_fd = sv[1];
+    assert_int_equal(write(bell[1], "x", 1), 1);
+    assert_int_equal(wl_fd_transport(sv[0], &client_t), WL_OK);
+    return &client_t;
+}
+#else
+/* Serial: every session shares the one line, and the link resynchronises. */
+static struct wl_transport *new_line(void)
+{
+    return &client_t;
+}
+#endif
 
 static int should_stop(void *ctx)
 {
@@ -53,7 +107,11 @@ static void *agent_main(void *arg)
 {
     struct agent_thread *a = arg;
 
+#ifdef EXEC_OVER_TCP
+    a->result = wl_agent_run(NULL, &listener, &a->cfg, 0xA6E47U);
+#else
     a->result = wl_agent_serve(&a->t, &a->cfg, 0xA6E47U);
+#endif
     return NULL;
 }
 
@@ -63,6 +121,14 @@ static struct wl_session_cfg fast_session(void)
 
     wl_session_cfg_init(&cfg);
     cfg.link.bytes_per_sec = 0; /* a pty is far faster than any serial line */
+#ifdef EXEC_OVER_TCP
+    /* The client's side; the agent builds its own, as the responder. */
+    wl_tcplink_cfg_init(&client_link);
+    client_link.initiator = 1;
+    client_link.psk = key;
+    cfg.make_link = wl_tcplink_make;
+    cfg.make_link_arg = &client_link;
+#endif
     return cfg;
 }
 
@@ -70,7 +136,15 @@ static int setup(void **state)
 {
     (void)state;
     memset(&agent, 0, sizeof(agent));
+#ifdef EXEC_OVER_TCP
+    memset(&client_t, 0, sizeof(client_t));
+    assert_int_equal(pipe(bell), 0);
+    listener.accept = one_accept;
+    listener.fd = bell[0];
+    listener.psk = key;
+#else
     pty_pair(&agent.t, &client_t);
+#endif
     agent.cfg.session = fast_session();
     agent.cfg.platform = WL_PLATFORM_LINUX;
     agent.cfg.stop = should_stop;
@@ -88,6 +162,13 @@ static int teardown(void **state)
     assert_int_equal(agent.result, WL_OK);
     wl_transport_close(&agent.t);
     wl_transport_close(&client_t);
+#ifdef EXEC_OVER_TCP
+    (void)close(bell[0]);
+    (void)close(bell[1]);
+    if (pending_fd >= 0)
+        (void)close(pending_fd);
+    pending_fd = -1;
+#endif
     return 0;
 }
 
@@ -164,7 +245,7 @@ static wl_status run_with_input(const char *cmd, struct wl_exec_result *r)
     static uint32_t seed = 5000;
 
     memset(&cap, 0, sizeof(cap));
-    return wl_client_exec(&client_t, &cfg, ++seed, cmd, NULL, 0, &io, 5000, r);
+    return wl_client_exec(new_line(), &cfg, ++seed, cmd, NULL, 0, &io, 5000, r);
 }
 
 static wl_status run(const char *cmd, const char *cwd, uint8_t flags, struct wl_exec_result *r)
@@ -174,7 +255,7 @@ static wl_status run(const char *cmd, const char *cwd, uint8_t flags, struct wl_
     static uint32_t seed = 1000;
 
     memset(&cap, 0, sizeof(cap));
-    return wl_client_exec(&client_t, &cfg, ++seed, cmd, cwd, flags, &io, 5000, r);
+    return wl_client_exec(new_line(), &cfg, ++seed, cmd, cwd, flags, &io, 5000, r);
 }
 
 static void test_output_streams_and_exit_code(void **state)
@@ -451,11 +532,12 @@ static void test_abandoned_command_does_not_block_the_next_client(void **state)
 
     (void)state;
     memset(&h, 0, sizeof(h));
+    line = new_line();
     p = wl_peer_new(&cfg, 31337, wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
     assert_non_null(p);
     start = wl_clock_ms();
     while (!wl_peer_ready(p) && wl_clock_since(start) < 3000U)
-        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
     assert_true(wl_peer_ready(p));
 
     wl_wbuf_init(&w, args, sizeof(args));
@@ -465,13 +547,13 @@ static void test_abandoned_command_does_not_block_the_next_client(void **state)
     assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &ch), WL_OK);
     start = wl_clock_ms();
     while (wl_clock_since(start) < 300U)
-        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
     wl_peer_free(p); /* the client is gone, the command is still running */
 
     /* A new client must be served promptly, not after the old command has
      * been confirmed dead. */
     start = wl_clock_ms();
-    assert_int_equal(wl_client_info(&client_t, &cfg, 4242, 3000, &hello), WL_OK);
+    assert_int_equal(wl_client_info(new_line(), &cfg, 4242, 3000, &hello), WL_OK);
     assert_true(wl_clock_since(start) < 2500U);
     assert_int_equal(hello.platform, WL_PLATFORM_LINUX);
 }
@@ -514,7 +596,7 @@ static void test_cancel_stops_the_command_on_the_agent(void **state)
 
     assert_int_equal(pthread_create(&th, NULL, cancel_after_300ms, NULL), 0);
     start = wl_clock_ms();
-    assert_int_equal(wl_client_exec(&client_t, &cfg, 7777, cmd, NULL, 0, &io, 5000, &r),
+    assert_int_equal(wl_client_exec(new_line(), &cfg, 7777, cmd, NULL, 0, &io, 5000, &r),
                      WL_OK);
     assert_int_equal(pthread_join(th, NULL), 0);
     assert_true(wl_clock_since(start) < 2000U);
@@ -526,7 +608,7 @@ static void test_cancel_stops_the_command_on_the_agent(void **state)
     /* The agent must still answer, and the command must be dead rather than
      * merely disowned. */
     start = wl_clock_ms();
-    assert_int_equal(wl_client_info(&client_t, &cfg, 8888, 3000, &hello), WL_OK);
+    assert_int_equal(wl_client_info(new_line(), &cfg, 8888, 3000, &hello), WL_OK);
     assert_true(wl_clock_since(start) < 2500U);
     usleep(2500000);
     assert_int_equal(access(marker, F_OK), -1);
@@ -556,7 +638,7 @@ static void test_cancel_stops_what_the_command_started(void **state)
     sprintf(cmd, "(sleep 2; touch %s) | cat", marker);
 
     assert_int_equal(pthread_create(&th, NULL, cancel_after_300ms, NULL), 0);
-    assert_int_equal(wl_client_exec(&client_t, &cfg, 7778, cmd, NULL, 0, &io, 5000, &r),
+    assert_int_equal(wl_client_exec(new_line(), &cfg, 7778, cmd, NULL, 0, &io, 5000, &r),
                      WL_OK);
     assert_int_equal(pthread_join(th, NULL), 0);
     assert_true(r.cancelled);
@@ -713,11 +795,19 @@ static void test_agent_caps_reports_the_port(void **state)
 
     (void)state;
     assert_int_equal(run("@caps", NULL, 0, &r), WL_OK);
+#ifdef EXEC_OVER_TCP
+    /* A socketpair has nothing to say about itself: refused, as the
+     * protocol says, with code 3. (The real TCP transport reports itself,
+     * tested in test_tcp.c.) */
+    assert_false(r.ran);
+    assert_int_equal(r.fail_code, 3);
+#else
     assert_true(r.ran);
     assert_int_equal(r.exit_code, 0);
     cap.out[cap.out_len] = '\0';
     assert_non_null(strstr(cap.out, "transport serial"));
     assert_non_null(strstr(cap.out, "current 115200\n"));
+#endif
 }
 
 /*
@@ -741,10 +831,11 @@ static void test_many_abandoned_commands_keep_the_agent_responsive(void **state)
         uint32_t start = wl_clock_ms();
 
         memset(&h, 0, sizeof(h));
+        line = new_line();
         p = wl_peer_new(&cfg, (uint32_t)(50000 + i), wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
         assert_non_null(p);
         while (!wl_peer_ready(p) && wl_clock_since(start) < 3000U)
-            assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+            assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
         assert_true(wl_peer_ready(p));
 
         wl_wbuf_init(&w, args, sizeof(args));
@@ -754,7 +845,7 @@ static void test_many_abandoned_commands_keep_the_agent_responsive(void **state)
         assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &ch), WL_OK);
         start = wl_clock_ms();
         while (wl_clock_since(start) < 100U)
-            assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+            assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
         wl_peer_free(p); /* abandoned with the command still running */
     }
 
@@ -762,7 +853,7 @@ static void test_many_abandoned_commands_keep_the_agent_responsive(void **state)
     {
         uint32_t start = wl_clock_ms();
 
-        assert_int_equal(wl_client_info(&client_t, &cfg, 4243, 3000, &hello), WL_OK);
+        assert_int_equal(wl_client_info(new_line(), &cfg, 4243, 3000, &hello), WL_OK);
         assert_true(wl_clock_since(start) < 2500U);
     }
 }
@@ -904,11 +995,12 @@ static void test_two_commands_run_at_once_on_one_session(void **state)
     h.ctx = &m;
     h.opened = multi_opened;
     h.record = multi_record;
+    line = new_line();
     p = wl_peer_new(&cfg, 61616, wl_clock_ms(), 1, WL_PLATFORM_LINUX, &h);
     assert_non_null(p);
     start = wl_clock_ms();
     while (!wl_peer_ready(p) && wl_clock_since(start) < 3000U)
-        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
     assert_true(wl_peer_ready(p));
 
     /* The slow one first: three lines about a second apart. */
@@ -926,7 +1018,7 @@ static void test_two_commands_run_at_once_on_one_session(void **state)
     assert_int_equal(wl_peer_open(p, WL_KIND_EXEC, args, w.len, &m.ch[0]), WL_OK);
     start = wl_clock_ms();
     while (m.opened[0] == 0 && wl_clock_since(start) < 3000U)
-        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
     assert_int_equal(m.opened[0], 1);
     (void)wl_peer_send(p, m.ch[0], WL_EXEC_STDIN_EOF, NULL, 0);
 
@@ -939,14 +1031,14 @@ static void test_two_commands_run_at_once_on_one_session(void **state)
     assert_int_not_equal(m.ch[0], m.ch[1]);
     start = wl_clock_ms();
     while (m.opened[1] == 0 && wl_clock_since(start) < 3000U)
-        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
     assert_int_equal(m.opened[1], 1);
     (void)wl_peer_send(p, m.ch[1], WL_EXEC_STDIN_EOF, NULL, 0);
     assert_false(m.exited[0]); /* the slow one cannot be done yet */
 
     start = wl_clock_ms();
     while ((!m.exited[0] || !m.exited[1]) && wl_clock_since(start) < 10000U)
-        assert_int_equal(wl_peer_pump(p, &client_t, 20), WL_OK);
+        assert_int_equal(wl_peer_pump(p, line, 20), WL_OK);
     assert_true(m.exited[0]);
     assert_true(m.exited[1]);
     assert_int_equal(m.code[0], 0);

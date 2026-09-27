@@ -9,6 +9,8 @@
 #include "devlink/proc.h"
 #include "devlink/proto.h"
 #include "devlink/sha256.h"
+#include "devlink/tcplink.h"
+#include "devlink/wait.h"
 #include "devlink/wire.h"
 
 #define LOOP_MS 20U
@@ -120,14 +122,46 @@ struct sync {
     int file_bad;
 };
 
-struct agent {
-    const struct wl_agent_cfg *cfg;
-    struct wl_transport *t; /* kept for @caps, which asks the port about itself */
+struct agent;
+
+/*
+ * One connection and the session on it: the serial port, or one accepted TCP
+ * connection. Everything a client can start lives here and dies with it; what
+ * the agent as a whole owns is in struct agent below.
+ */
+struct conn {
+    struct agent *ag;
+    struct conn *next;
+    struct wl_transport *t; /* also asked about itself by @caps */
+    struct wl_transport owned; /* the socket, for a TCP connection */
+    int is_tcp;
+    char name[64]; /* "serial", or the client's address */
+    struct wl_tcplink_cfg tcfg;
+    struct wl_session_cfg scfg;
     struct wl_peer *peer;
     uint32_t reported_gen; /* session whose stream error was already logged */
     struct exec execs[WL_AGENT_MAX_EXEC];
     struct xfer xfers[WL_AGENT_MAX_XFER];
     struct sync sync;
+    int was_ready; /* a client was attached as of the last loop iteration */
+};
+
+/* An address that failed the handshake, ignored until `until`. */
+#define PENALTY_MS 2000U
+#define MAX_PENALTIES 16U
+
+struct penalty {
+    char addr[64]; /* without the port: a client retries from a new one */
+    uint32_t until;
+};
+
+struct agent {
+    const struct wl_agent_cfg *cfg;
+    const struct wl_agent_listener *tcp;
+    struct penalty penalties[MAX_PENALTIES];
+    uint32_t seed;
+    struct conn *conns;
+    unsigned tcp_conns;
     /* Processes being torn down. Abandoning a command must never hold up
      * the link (docs/bug-critical-error-hang.md, defect 2), so they are
      * killed here and collected a little at a time by the serving loop. A
@@ -135,19 +169,22 @@ struct agent {
      * commands, and running out of slots used to mean falling back to the
      * blocking teardown, which is the thing being avoided. */
     struct reaping *reaping;
-    int stopping;  /* @stop received: finish the exchange, then return */
-    int was_ready; /* a client was attached as of the last loop iteration */
+    int stopping; /* @stop received: finish the exchange, then return */
 };
 
 /* One line to the console: a fixed prefix and a variable part. */
-static void log_line(struct agent *a, const char *prefix, const char *detail)
+static void log_line(struct conn *c, const char *prefix, const char *detail)
 {
     char buf[512];
 
-    if (a->cfg->log == NULL)
+    if (c->ag->cfg->log == NULL)
         return;
-    (void)snprintf(buf, sizeof(buf), "%s%s", prefix, detail);
-    a->cfg->log(a->cfg->log_ctx, buf);
+    /* Serial reads as it always has; a TCP session says whose it is. */
+    if (c->is_tcp)
+        (void)snprintf(buf, sizeof(buf), "[%s] %s%s", c->name, prefix, detail);
+    else
+        (void)snprintf(buf, sizeof(buf), "%s%s", prefix, detail);
+    c->ag->cfg->log(c->ag->cfg->log_ctx, buf);
 }
 
 /*
@@ -155,14 +192,16 @@ static void log_line(struct agent *a, const char *prefix, const char *detail)
  * log_line because the two always report together: a moment that reaches only
  * one of them is a bug in whichever was forgotten.
  */
-static void emit(struct agent *a, const struct wl_agent_event *e)
+static void emit(struct conn *c, struct wl_agent_event *e)
 {
-    if (a->cfg->event != NULL)
-        a->cfg->event(a->cfg->event_ctx, e);
+    e->session = c->name;
+    e->tcp = (uint8_t)c->is_tcp;
+    if (c->ag->cfg->event != NULL)
+        c->ag->cfg->event(c->ag->cfg->event_ctx, e);
 }
 
 /* Session transitions, and the end of a piece of work. */
-static void emit_at(struct agent *a, uint8_t type, uint16_t ch, uint32_t code)
+static void emit_at(struct conn *c, uint8_t type, uint16_t ch, uint32_t code)
 {
     struct wl_agent_event e;
 
@@ -170,10 +209,10 @@ static void emit_at(struct agent *a, uint8_t type, uint16_t ch, uint32_t code)
     e.type = type;
     e.ch = ch;
     e.code = code;
-    emit(a, &e);
+    emit(c, &e);
 }
 
-static void emit_work(struct agent *a, uint16_t ch, uint8_t kind, const char *what,
+static void emit_work(struct conn *c, uint16_t ch, uint8_t kind, const char *what,
                       uint64_t total)
 {
     struct wl_agent_event e;
@@ -184,10 +223,10 @@ static void emit_work(struct agent *a, uint16_t ch, uint8_t kind, const char *wh
     e.kind = kind;
     e.text = what;
     e.total = total;
-    emit(a, &e);
+    emit(c, &e);
 }
 
-static void emit_progress(struct agent *a, uint16_t ch, uint64_t done)
+static void emit_progress(struct conn *c, uint16_t ch, uint64_t done)
 {
     struct wl_agent_event e;
 
@@ -195,27 +234,27 @@ static void emit_progress(struct agent *a, uint16_t ch, uint64_t done)
     e.type = WL_EV_PROGRESS;
     e.ch = ch;
     e.done = done;
-    emit(a, &e);
+    emit(c, &e);
 }
 
 struct sync;
-static void sync_end(struct agent *a, struct sync *y);
+static void sync_end(struct conn *c, struct sync *y);
 
-static struct xfer *find_xfer(struct agent *a, uint16_t ch)
+static struct xfer *find_xfer(struct conn *c, uint16_t ch)
 {
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
-        if (a->xfers[i].active && a->xfers[i].ch == ch)
-            return &a->xfers[i];
+        if (c->xfers[i].active && c->xfers[i].ch == ch)
+            return &c->xfers[i];
     }
     return NULL;
 }
 
-static void end_xfer(struct agent *a, struct xfer *x, int keep_temp)
+static void end_xfer(struct conn *c, struct xfer *x, int keep_temp)
 {
     /* Only work that was announced is reported as finished; a transfer
      * rejected before it went active never appeared anywhere. */
     if (x->active)
-        emit_at(a, WL_EV_FINISHED, x->ch, 0);
+        emit_at(c, WL_EV_FINISHED, x->ch, 0);
     if (x->f != NULL)
         (void)fclose(x->f);
     if (!keep_temp && x->kind == WL_KIND_PUT && x->tmp[0] != '\0')
@@ -223,27 +262,27 @@ static void end_xfer(struct agent *a, struct xfer *x, int keep_temp)
     memset(x, 0, sizeof(*x));
 }
 
-static struct exec *find_exec(struct agent *a, uint16_t ch)
+static struct exec *find_exec(struct conn *c, uint16_t ch)
 {
     for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-        if (a->execs[i].active && a->execs[i].ch == ch)
-            return &a->execs[i];
+        if (c->execs[i].active && c->execs[i].ch == ch)
+            return &c->execs[i];
     }
     return NULL;
 }
 
 /* Ends a command without blocking: the process goes to the reaper. */
-static void end_exec(struct agent *a, struct exec *e)
+static void end_exec(struct conn *c, struct exec *e)
 {
     if (e->active)
-        emit_at(a, WL_EV_FINISHED, e->ch, e->code);
+        emit_at(c, WL_EV_FINISHED, e->ch, e->code);
     if (e->proc != NULL) {
         struct reaping *r = malloc(sizeof(*r));
 
         if (r != NULL) {
             r->proc = e->proc;
-            r->next = a->reaping;
-            a->reaping = r;
+            r->next = c->ag->reaping;
+            c->ag->reaping = r;
         } else {
             /* Out of memory for one pointer, so the bounded teardown it is;
              * it no longer forces anything down, it only takes a moment. */
@@ -255,10 +294,22 @@ static void end_exec(struct agent *a, struct exec *e)
     memset(e, 0, sizeof(*e));
 }
 
-/* One pass over the list, releasing whatever has finally let go. */
-static void reap(struct agent *a)
+/* Commands running across every session. */
+static unsigned execs_running(const struct agent *ag)
 {
-    struct reaping **link = &a->reaping;
+    unsigned n = 0;
+
+    for (const struct conn *c = ag->conns; c != NULL; c = c->next) {
+        for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++)
+            n += c->execs[i].active ? 1U : 0U;
+    }
+    return n;
+}
+
+/* One pass over the list, releasing whatever has finally let go. */
+static void reap(struct agent *ag)
+{
+    struct reaping **link = &ag->reaping;
 
     while (*link != NULL) {
         struct reaping *r = *link;
@@ -278,36 +329,36 @@ static void reap(struct agent *a)
 
 static void on_session(void *ctx)
 {
-    struct agent *a = ctx;
+    struct conn *c = ctx;
 
     /* The previous client is gone; nobody will read its commands' output,
      * and its half-written uploads are worthless. */
     for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-        if (a->execs[i].active)
-            end_exec(a, &a->execs[i]);
+        if (c->execs[i].active)
+            end_exec(c, &c->execs[i]);
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
-        if (a->xfers[i].active)
-            end_xfer(a, &a->xfers[i], 0);
+        if (c->xfers[i].active)
+            end_xfer(c, &c->xfers[i], 0);
     }
-    if (a->sync.active)
-        sync_end(a, &a->sync);
-    log_line(a, "session: new client", "");
-    emit_at(a, WL_EV_SESSION, 0, 0);
+    if (c->sync.active)
+        sync_end(c, &c->sync);
+    log_line(c, "session: new client", "");
+    emit_at(c, WL_EV_SESSION, 0, 0);
 }
 
 static void on_ready(void *ctx, const struct wl_hello *h)
 {
-    struct agent *a = ctx;
+    struct conn *c = ctx;
 
-    log_line(a, "session: client ", h->build);
+    log_line(c, "session: client ", h->build);
     {
         struct wl_agent_event e;
 
         memset(&e, 0, sizeof(e));
         e.type = WL_EV_READY;
         e.text = h->build;
-        emit(a, &e);
+        emit(c, &e);
     }
 }
 
@@ -328,20 +379,20 @@ static void on_ready(void *ctx, const struct wl_hello *h)
  * without meaning a drive, only bites when that drive is also empty, and then
  * the refusal is a good deal more useful than the freeze.
  */
-static int drives_are_ready(struct agent *a, const char *cmd, char *bad)
+static int drives_are_ready(struct conn *c, const char *cmd, char *bad)
 {
-    int (*ready)(char) = a->cfg->drive_ready != NULL ? a->cfg->drive_ready : wl_fs_drive_ready;
+    int (*ready)(char) = c->ag->cfg->drive_ready != NULL ? c->ag->cfg->drive_ready : wl_fs_drive_ready;
     uint32_t seen = 0;
 
     for (size_t i = 0; cmd[i] != '\0'; i++) {
-        char c = cmd[i];
+        char letter = cmd[i];
         unsigned bit;
 
         if (cmd[i + 1] != ':')
             continue;
-        if (c >= 'a' && c <= 'z')
-            c = (char)(c - 'a' + 'A');
-        if (c < 'A' || c > 'Z')
+        if (letter >= 'a' && letter <= 'z')
+            letter = (char)(letter - 'a' + 'A');
+        if (letter < 'A' || letter > 'Z')
             continue;
         /* A letter run together with what precedes it is part of a word, not
          * a drive: the g of "prog:" is not drive G. */
@@ -349,12 +400,12 @@ static int drives_are_ready(struct agent *a, const char *cmd, char *bad)
                       (cmd[i - 1] >= 'a' && cmd[i - 1] <= 'z') ||
                       (cmd[i - 1] >= '0' && cmd[i - 1] <= '9')))
             continue;
-        bit = 1U << (unsigned)(c - 'A');
+        bit = 1U << (unsigned)(letter - 'A');
         if ((seen & bit) != 0)
             continue;
         seen |= bit;
-        if (!ready(c)) {
-            *bad = c;
+        if (!ready(letter)) {
+            *bad = letter;
             return 0;
         }
     }
@@ -448,34 +499,34 @@ static int listing_line(void *ctx, const char *name, int is_dir, uint64_t size,
 }
 
 /* Returns nonzero if the slot is now serving the listing. */
-static int agent_dir(struct agent *a, uint16_t ch, const char *path, struct exec *e)
+static int agent_dir(struct conn *c, uint16_t ch, const char *path, struct exec *e)
 {
     struct listing l;
     char bad = '\0';
     wl_status st;
 
     if (path[0] == '\0') {
-        (void)wl_peer_reject(a->peer, ch, WL_E_PATH, "@dir needs a path");
+        (void)wl_peer_reject(c->peer, ch, WL_E_PATH, "@dir needs a path");
         return 0;
     }
     /* The same guard as a shell command gets: a listing of an empty drive
      * must fail here rather than anywhere near DOS. */
-    if (!drives_are_ready(a, path, &bad)) {
+    if (!drives_are_ready(c, path, &bad)) {
         char msg[64];
 
         sprintf(msg, "drive %c: is not ready", bad);
-        (void)wl_peer_reject(a->peer, ch, WL_E_NOT_FOUND, msg);
+        (void)wl_peer_reject(c->peer, ch, WL_E_NOT_FOUND, msg);
         return 0;
     }
     memset(&l, 0, sizeof(l));
     st = wl_fs_list(path, listing_line, &l);
     if (st != WL_OK || l.oom) {
         free(l.buf);
-        (void)wl_peer_reject(a->peer, ch, l.oom ? WL_E_PROCESS : WL_E_NOT_FOUND,
+        (void)wl_peer_reject(c->peer, ch, l.oom ? WL_E_PROCESS : WL_E_NOT_FOUND,
                              l.oom ? "agent out of memory" : wl_error());
         return 0;
     }
-    if (wl_peer_accept(a->peer, ch) != WL_OK) {
+    if (wl_peer_accept(c->peer, ch) != WL_OK) {
         free(l.buf);
         return 0;
     }
@@ -485,7 +536,7 @@ static int agent_dir(struct agent *a, uint16_t ch, const char *path, struct exec
     e->ch = ch;
     e->out_buf = l.buf;
     e->out_len = l.len;
-    log_line(a, "dir: ", path);
+    log_line(c, "dir: ", path);
     return 1;
 }
 
@@ -496,29 +547,29 @@ static int agent_dir(struct agent *a, uint16_t ch, const char *path, struct exec
  *
  * Returns nonzero if the slot is now serving the answer.
  */
-static int agent_caps(struct agent *a, uint16_t ch, struct exec *e)
+static int agent_caps(struct conn *c, uint16_t ch, struct exec *e)
 {
     char buf[1024];
-    wl_status st = wl_transport_caps(a->t, buf, sizeof(buf));
+    wl_status st = wl_transport_caps(c->t, buf, sizeof(buf));
     size_t n;
 
     if (st != WL_OK) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, wl_error());
+        (void)wl_peer_reject(c->peer, ch, WL_E_UNKNOWN, wl_error());
         return 0;
     }
     n = strlen(buf);
-    if (wl_peer_accept(a->peer, ch) != WL_OK)
+    if (wl_peer_accept(c->peer, ch) != WL_OK)
         return 0;
     e->out_buf = malloc(n);
     if (e->out_buf == NULL) {
-        (void)wl_peer_close(a->peer, ch);
+        (void)wl_peer_close(c->peer, ch);
         return 0;
     }
     memcpy(e->out_buf, buf, n);
     e->out_len = n;
     e->active = 1;
     e->ch = ch;
-    log_line(a, "caps: reported", "");
+    log_line(c, "caps: reported", "");
     return 1;
 }
 
@@ -536,7 +587,7 @@ static int agent_caps(struct agent *a, uint16_t ch, struct exec *e)
  *
  * Returns nonzero if the slot is now serving the answer.
  */
-static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec *e)
+static int agent_time(struct conn *c, uint16_t ch, const char *arg, struct exec *e)
 {
     char buf[256];
     char zone[64];
@@ -551,22 +602,22 @@ static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec
         while (*p == ' ')
             p++;
         if (*p < '0' || *p > '9') {
-            (void)wl_peer_reject(a->peer, ch, WL_E_MALFORMED, "@time set needs a number");
+            (void)wl_peer_reject(c->peer, ch, WL_E_MALFORMED, "@time set needs a number");
             return 0;
         }
         for (; *p >= '0' && *p <= '9'; p++)
             want = (want * 10U) + (uint64_t)(*p - '0');
         if (wl_clock_set_utc(want) != WL_OK) {
-            (void)wl_peer_reject(a->peer, ch, WL_E_ACCESS, wl_error());
+            (void)wl_peer_reject(c->peer, ch, WL_E_ACCESS, wl_error());
             return 0;
         }
-        log_line(a, "clock: set from the client", "");
+        log_line(c, "clock: set from the client", "");
     } else if (arg[0] != '\0') {
-        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "usage: @time [set SECONDS]");
+        (void)wl_peer_reject(c->peer, ch, WL_E_UNKNOWN, "usage: @time [set SECONDS]");
         return 0;
     }
     if (wl_clock_utc(&now) != WL_OK) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, wl_error());
+        (void)wl_peer_reject(c->peer, ch, WL_E_UNKNOWN, wl_error());
         return 0;
     }
     off = wl_clock_local_offset_minutes();
@@ -586,11 +637,11 @@ static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec
         buf[n++] = '\n';
     }
 
-    if (wl_peer_accept(a->peer, ch) != WL_OK)
+    if (wl_peer_accept(c->peer, ch) != WL_OK)
         return 0;
     e->out_buf = malloc(n);
     if (e->out_buf == NULL) {
-        (void)wl_peer_close(a->peer, ch);
+        (void)wl_peer_close(c->peer, ch);
         return 0;
     }
     memcpy(e->out_buf, buf, n);
@@ -610,7 +661,7 @@ static int agent_time(struct agent *a, uint16_t ch, const char *arg, struct exec
  *
  * Returns nonzero if the exec slot is now in use.
  */
-static int agent_command(struct agent *a, uint16_t ch, const char *cmd, struct exec *e)
+static int agent_command(struct conn *c, uint16_t ch, const char *cmd, struct exec *e)
 {
     uint8_t code[4];
 
@@ -619,33 +670,33 @@ static int agent_command(struct agent *a, uint16_t ch, const char *cmd, struct e
 
         while (*path == ' ')
             path++;
-        return agent_dir(a, ch, path, e);
+        return agent_dir(c, ch, path, e);
     }
     if (strcmp(cmd, "@caps") == 0)
-        return agent_caps(a, ch, e);
+        return agent_caps(c, ch, e);
     if (strncmp(cmd, "@time", 5) == 0 && (cmd[5] == ' ' || cmd[5] == '\0')) {
         const char *arg = cmd + 5;
 
         while (*arg == ' ')
             arg++;
-        return agent_time(a, ch, arg, e);
+        return agent_time(c, ch, arg, e);
     }
     if (strcmp(cmd, "@stop") != 0) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "unknown agent command");
+        (void)wl_peer_reject(c->peer, ch, WL_E_UNKNOWN, "unknown agent command");
         return 0;
     }
-    if (wl_peer_accept(a->peer, ch) != WL_OK)
+    if (wl_peer_accept(c->peer, ch) != WL_OK)
         return 0;
     wl_put_u32le(code, 0);
-    (void)wl_peer_send(a->peer, ch, WL_EXEC_EXIT, code, sizeof(code));
-    (void)wl_peer_close(a->peer, ch);
-    a->stopping = 1;
-    log_line(a, "stopping at the client's request", "");
-    emit_at(a, WL_EV_STOPPING, ch, 0);
+    (void)wl_peer_send(c->peer, ch, WL_EXEC_EXIT, code, sizeof(code));
+    (void)wl_peer_close(c->peer, ch);
+    c->ag->stopping = 1;
+    log_line(c, "stopping at the client's request", "");
+    emit_at(c, WL_EV_STOPPING, ch, 0);
     return 0;
 }
 
-static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
+static void open_exec(struct conn *c, uint16_t ch, const uint8_t *args, size_t n)
 {
     struct wl_rbuf r;
     const char *cmd;
@@ -663,15 +714,17 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     cwd = wl_r_str(&r, &cwd_n);
     flags = wl_r_u8(&r);
     if (r.bad || cmd_n == 0) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_MALFORMED, "malformed EXEC arguments");
+        (void)wl_peer_reject(c->peer, ch, WL_E_MALFORMED, "malformed EXEC arguments");
         return;
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_EXEC && e == NULL; i++) {
-        if (!a->execs[i].active)
-            e = &a->execs[i];
+        if (!c->execs[i].active)
+            e = &c->execs[i];
     }
-    if (e == NULL) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_PROCESS, "too many commands running");
+    /* The slots are the agent's, not the session's: every session may use
+     * them, and together they may not use more. */
+    if (e == NULL || execs_running(c->ag) >= WL_AGENT_MAX_EXEC) {
+        (void)wl_peer_reject(c->peer, ch, WL_E_PROCESS, "too many commands running");
         return;
     }
     cmd_z = malloc(cmd_n + 1);
@@ -682,7 +735,7 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
         free(cwd_z);
         free(e->stdin_q);
         e->stdin_q = NULL;
-        (void)wl_peer_reject(a->peer, ch, WL_E_PROCESS, "agent out of memory");
+        (void)wl_peer_reject(c->peer, ch, WL_E_PROCESS, "agent out of memory");
         return;
     }
     memcpy(cmd_z, cmd, cmd_n);
@@ -691,7 +744,7 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     cwd_z[cwd_n] = '\0';
 
     if (cmd_z[0] == '@') {
-        if (!agent_command(a, ch, cmd_z, e)) {
+        if (!agent_command(c, ch, cmd_z, e)) {
             free(e->stdin_q);
             e->stdin_q = NULL;
         }
@@ -702,12 +755,12 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     {
         char bad = '\0';
 
-        if (!drives_are_ready(a, cmd_z, &bad)) {
+        if (!drives_are_ready(c, cmd_z, &bad)) {
             char msg[64];
 
             sprintf(msg, "drive %c: is not ready", bad);
-            (void)wl_peer_reject(a->peer, ch, WL_E_NOT_FOUND, msg);
-            log_line(a, "exec refused: ", msg);
+            (void)wl_peer_reject(c->peer, ch, WL_E_NOT_FOUND, msg);
+            log_line(c, "exec refused: ", msg);
             free(cmd_z);
             free(cwd_z);
             free(e->stdin_q);
@@ -717,38 +770,38 @@ static void open_exec(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     }
     st = wl_proc_start(cmd_z, cwd_z, (flags & WL_EXEC_MERGE_STDERR) != 0, &e->proc);
     if (st != WL_OK) {
-        (void)wl_peer_reject(a->peer, ch, st == WL_ERR_INVAL ? WL_E_PATH : WL_E_PROCESS,
+        (void)wl_peer_reject(c->peer, ch, st == WL_ERR_INVAL ? WL_E_PATH : WL_E_PROCESS,
                              wl_error());
-        log_line(a, "exec failed: ", wl_error());
+        log_line(c, "exec failed: ", wl_error());
         free(e->stdin_q);
         e->stdin_q = NULL;
-    } else if (wl_peer_accept(a->peer, ch) != WL_OK) {
-        end_exec(a, e);
+    } else if (wl_peer_accept(c->peer, ch) != WL_OK) {
+        end_exec(c, e);
     } else {
         e->active = 1;
         e->ch = ch;
         /* Input is credited as the process takes it, not as it arrives: the
          * queue below is exactly one credit window, and that only holds if
          * the client is told to refill at the rate the command reads. */
-        (void)wl_peer_hold_credit(a->peer, ch);
-        log_line(a, "exec: ", cmd_z);
-        emit_work(a, ch, WL_KIND_EXEC, cmd_z, 0);
+        (void)wl_peer_hold_credit(c->peer, ch);
+        log_line(c, "exec: ", cmd_z);
+        emit_work(c, ch, WL_KIND_EXEC, cmd_z, 0);
     }
     free(cmd_z);
     free(cwd_z);
 }
 
-static struct xfer *new_xfer(struct agent *a, uint16_t ch, uint8_t kind,
+static struct xfer *new_xfer(struct conn *c, uint16_t ch, uint8_t kind,
                              const char *path, size_t path_n)
 {
     struct xfer *x = NULL;
 
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER && x == NULL; i++) {
-        if (!a->xfers[i].active)
-            x = &a->xfers[i];
+        if (!c->xfers[i].active)
+            x = &c->xfers[i];
     }
     if (x == NULL || path_n == 0 || path_n >= sizeof(x->path)) {
-        (void)wl_peer_reject(a->peer, ch, x == NULL ? WL_E_PROCESS : WL_E_PATH,
+        (void)wl_peer_reject(c->peer, ch, x == NULL ? WL_E_PROCESS : WL_E_PATH,
                              x == NULL ? "too many transfers" : "path too long");
         return NULL;
     }
@@ -760,7 +813,7 @@ static struct xfer *new_xfer(struct agent *a, uint16_t ch, uint8_t kind,
     return x;
 }
 
-static void open_put(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
+static void open_put(struct conn *c, uint16_t ch, const uint8_t *args, size_t n)
 {
     struct wl_rbuf r;
     const char *path;
@@ -779,20 +832,20 @@ static void open_put(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
     mtime = wl_r_u64(&r);
     flags = wl_r_u8(&r);
     if (r.bad) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_MALFORMED, "malformed PUT arguments");
+        (void)wl_peer_reject(c->peer, ch, WL_E_MALFORMED, "malformed PUT arguments");
         return;
     }
-    x = new_xfer(a, ch, WL_KIND_PUT, path, path_n);
+    x = new_xfer(c, ch, WL_KIND_PUT, path, path_n);
     if (x == NULL)
         return;
     if (wl_fs_stat(x->path, &have_size, &have_mtime, &is_dir) == WL_OK) {
         if (is_dir) {
-            (void)wl_peer_reject(a->peer, ch, WL_E_PATH, "destination is a directory");
+            (void)wl_peer_reject(c->peer, ch, WL_E_PATH, "destination is a directory");
             memset(x, 0, sizeof(*x));
             return;
         }
         if ((flags & WL_PUT_OVERWRITE) == 0) {
-            (void)wl_peer_reject(a->peer, ch, WL_E_EXISTS, "file exists");
+            (void)wl_peer_reject(c->peer, ch, WL_E_EXISTS, "file exists");
             memset(x, 0, sizeof(*x));
             return;
         }
@@ -800,22 +853,22 @@ static void open_put(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
     if (wl_fs_temp_name(x->path, x->tmp, sizeof(x->tmp)) == WL_OK)
         x->f = fopen(x->tmp, "wb");
     if (x->f == NULL) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_ACCESS, "cannot create the file");
+        (void)wl_peer_reject(c->peer, ch, WL_E_ACCESS, "cannot create the file");
         memset(x, 0, sizeof(*x));
         return;
     }
     x->size = size;
     x->mtime = mtime;
-    if (wl_peer_accept(a->peer, ch) != WL_OK) {
-        end_xfer(a, x, 0);
+    if (wl_peer_accept(c->peer, ch) != WL_OK) {
+        end_xfer(c, x, 0);
         return;
     }
     x->active = 1;
-    log_line(a, "put: ", x->path);
-    emit_work(a, ch, WL_KIND_PUT, x->path, x->size);
+    log_line(c, "put: ", x->path);
+    emit_work(c, ch, WL_KIND_PUT, x->path, x->size);
 }
 
-static void open_get(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
+static void open_get(struct conn *c, uint16_t ch, const uint8_t *args, size_t n)
 {
     struct wl_rbuf r;
     const char *path;
@@ -827,51 +880,51 @@ static void open_get(struct agent *a, uint16_t ch, const uint8_t *args, size_t n
     wl_rbuf_init(&r, args, n);
     path = wl_r_str(&r, &path_n);
     if (r.bad) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_MALFORMED, "malformed GET arguments");
+        (void)wl_peer_reject(c->peer, ch, WL_E_MALFORMED, "malformed GET arguments");
         return;
     }
-    x = new_xfer(a, ch, WL_KIND_GET, path, path_n);
+    x = new_xfer(c, ch, WL_KIND_GET, path, path_n);
     if (x == NULL)
         return;
     if (wl_fs_stat(x->path, &x->size, &x->mtime, &is_dir) != WL_OK) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_NOT_FOUND, wl_error());
+        (void)wl_peer_reject(c->peer, ch, WL_E_NOT_FOUND, wl_error());
         memset(x, 0, sizeof(*x));
         return;
     }
     if (is_dir) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_PATH, "that is a directory");
+        (void)wl_peer_reject(c->peer, ch, WL_E_PATH, "that is a directory");
         memset(x, 0, sizeof(*x));
         return;
     }
     x->f = fopen(x->path, "rb");
     if (x->f == NULL) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_ACCESS, "cannot read the file");
+        (void)wl_peer_reject(c->peer, ch, WL_E_ACCESS, "cannot read the file");
         memset(x, 0, sizeof(*x));
         return;
     }
-    if (wl_peer_accept(a->peer, ch) != WL_OK) {
-        end_xfer(a, x, 0);
+    if (wl_peer_accept(c->peer, ch) != WL_OK) {
+        end_xfer(c, x, 0);
         return;
     }
     wl_put_u64le(meta, x->size);
     wl_put_u64le(meta + 8, x->mtime);
     x->active = 1;
-    if (wl_peer_send(a->peer, ch, WL_FILE_META, meta, sizeof(meta)) != WL_OK) {
-        end_xfer(a, x, 0);
+    if (wl_peer_send(c->peer, ch, WL_FILE_META, meta, sizeof(meta)) != WL_OK) {
+        end_xfer(c, x, 0);
         return;
     }
-    log_line(a, "get: ", x->path);
-    emit_work(a, ch, WL_KIND_GET, x->path, x->size);
+    log_line(c, "get: ", x->path);
+    emit_work(c, ch, WL_KIND_GET, x->path, x->size);
 }
 
 /* ---------------------------------------------------------------------------
  * sync
  * ------------------------------------------------------------------------- */
 
-static void sync_end(struct agent *a, struct sync *y)
+static void sync_end(struct conn *c, struct sync *y)
 {
     if (y->active)
-        emit_at(a, WL_EV_FINISHED, y->ch, 0);
+        emit_at(c, WL_EV_FINISHED, y->ch, 0);
     if (y->hash_f != NULL)
         (void)fclose(y->hash_f);
     if (y->f != NULL)
@@ -942,7 +995,7 @@ static int sync_was_listed(const struct sync *y, const char *rel)
 }
 
 /* Compares one manifest entry with what is on disk here. */
-static void sync_entry(struct agent *a, struct sync *y, const char *rel, uint64_t size,
+static void sync_entry(struct conn *c, struct sync *y, const char *rel, uint64_t size,
                        uint64_t mtime, const uint8_t *hash)
 {
     char full[WL_PATH_MAX];
@@ -986,7 +1039,7 @@ static void sync_entry(struct agent *a, struct sync *y, const char *rel, uint64_
         memcpy(ph->want, hash, WL_HASH_BYTES);
         ph->mtime = mtime;
     }
-    (void)a;
+    (void)c;
 }
 
 /* Hashes at most this much per call, so the link is serviced every few
@@ -1056,7 +1109,7 @@ static int sync_hash_step(struct sync *y)
 }
 
 struct delete_ctx {
-    struct agent *a;
+    struct conn *c;
     struct sync *y;
 };
 
@@ -1080,19 +1133,19 @@ static int delete_extra(void *ctx, const char *rel, uint64_t size, uint64_t mtim
     return 1;
 }
 
-static void sync_manifest_done(struct agent *a, struct sync *y)
+static void sync_manifest_done(struct conn *c, struct sync *y)
 {
     y->manifest_done = 1;
     if ((y->flags & WL_SYNC_DELETE) == 0)
         return;
     if (y->seen_overflow) {
-        log_line(a, "sync: too many files to delete safely; nothing removed", "");
+        log_line(c, "sync: too many files to delete safely; nothing removed", "");
         return;
     }
     {
         struct delete_ctx d;
 
-        d.a = a;
+        d.c = c;
         d.y = y;
         /* Hidden files are included: the client decides what it sends, and
          * a file it never mentions is extraneous either way. */
@@ -1100,7 +1153,7 @@ static void sync_manifest_done(struct agent *a, struct sync *y)
     }
 }
 
-static void sync_file_begin(struct agent *a, struct sync *y, struct wl_rbuf *r)
+static void sync_file_begin(struct conn *c, struct sync *y, struct wl_rbuf *r)
 {
     size_t len;
     const char *rel = wl_r_str(r, &len);
@@ -1137,7 +1190,7 @@ static void sync_file_begin(struct agent *a, struct sync *y, struct wl_rbuf *r)
         if (wl_fs_mkdir_p(dir) != WL_OK) {
             y->file_bad = 1;
             y->failed++;
-            log_line(a, "sync: ", wl_error());
+            log_line(c, "sync: ", wl_error());
             return;
         }
     }
@@ -1150,7 +1203,7 @@ static void sync_file_begin(struct agent *a, struct sync *y, struct wl_rbuf *r)
     }
 }
 
-static void sync_file_end(struct agent *a, struct sync *y, uint32_t want_crc)
+static void sync_file_end(struct conn *c, struct sync *y, uint32_t want_crc)
 {
     if (y->file_bad || y->f == NULL) {
         y->file_bad = 0;
@@ -1161,7 +1214,7 @@ static void sync_file_end(struct agent *a, struct sync *y, uint32_t want_crc)
         (void)wl_fs_remove(y->tmp);
         y->tmp[0] = '\0';
         y->failed++;
-        log_line(a, "sync: bad copy of ", y->path);
+        log_line(c, "sync: bad copy of ", y->path);
         return;
     }
     y->f = NULL;
@@ -1169,17 +1222,17 @@ static void sync_file_end(struct agent *a, struct sync *y, uint32_t want_crc)
         (void)wl_fs_remove(y->tmp);
         y->tmp[0] = '\0';
         y->failed++;
-        log_line(a, "sync: ", wl_error());
+        log_line(c, "sync: ", wl_error());
         return;
     }
     y->tmp[0] = '\0';
     if (y->mtime != 0)
         (void)wl_fs_set_mtime(y->path, y->mtime);
     y->written++;
-    (void)a;
+    (void)c;
 }
 
-static void on_sync_record(struct agent *a, struct sync *y, uint8_t type, const uint8_t *p,
+static void on_sync_record(struct conn *c, struct sync *y, uint8_t type, const uint8_t *p,
                            size_t n)
 {
     struct wl_rbuf r;
@@ -1201,15 +1254,15 @@ static void on_sync_record(struct agent *a, struct sync *y, uint8_t type, const 
                 break;
             memcpy(rel_z, rel, len);
             rel_z[len] = '\0';
-            sync_entry(a, y, rel_z, size, mtime, hash);
+            sync_entry(c, y, rel_z, size, mtime, hash);
         }
         return;
     }
     case WL_SYNC_MANIFEST_END:
-        sync_manifest_done(a, y);
+        sync_manifest_done(c, y);
         return;
     case WL_SYNC_FILE:
-        sync_file_begin(a, y, &r);
+        sync_file_begin(c, y, &r);
         return;
     case WL_SYNC_DATA:
         if (y->file_bad || y->f == NULL)
@@ -1217,22 +1270,22 @@ static void on_sync_record(struct agent *a, struct sync *y, uint8_t type, const 
         if (n > 0 && fwrite(p, 1, n, y->f) != n) {
             y->file_bad = 1;
             y->failed++;
-            log_line(a, "sync: cannot write ", y->path);
+            log_line(c, "sync: cannot write ", y->path);
             return;
         }
         y->crc = wl_crc32(y->crc, p, n);
         return;
     case WL_SYNC_FILE_END:
         if (n == 4)
-            sync_file_end(a, y, wl_get_u32le(p));
+            sync_file_end(c, y, wl_get_u32le(p));
         return;
     case WL_SYNC_DONE: {
         uint8_t buf[8];
 
         wl_put_u32le(buf, y->written);
         wl_put_u32le(buf + 4, y->failed);
-        (void)wl_peer_send(a->peer, y->ch, WL_SYNC_SUMMARY, buf, sizeof(buf));
-        log_line(a, "sync: done", "");
+        (void)wl_peer_send(c->peer, y->ch, WL_SYNC_SUMMARY, buf, sizeof(buf));
+        log_line(c, "sync: done", "");
         return;
     }
     default:
@@ -1241,7 +1294,7 @@ static void on_sync_record(struct agent *a, struct sync *y, uint8_t type, const 
 }
 
 /* Hands the agent's NEED list to the client as the mux accepts it. */
-static void service_sync(struct agent *a, struct sync *y)
+static void service_sync(struct conn *c, struct sync *y)
 {
     uint8_t buf[WL_REC_MAX_PAYLOAD];
 
@@ -1274,7 +1327,7 @@ static void service_sync(struct agent *a, struct sync *y)
         if (count == 0)
             break;
         wl_put_u16le(buf, (uint16_t)count);
-        if (wl_peer_send(a->peer, y->ch, WL_SYNC_NEED, buf, w.len) != WL_OK)
+        if (wl_peer_send(c->peer, y->ch, WL_SYNC_NEED, buf, w.len) != WL_OK)
             return;
         y->sent_need += count;
     }
@@ -1283,26 +1336,26 @@ static void service_sync(struct agent *a, struct sync *y)
 
         wl_put_u32le(end, y->same);
         wl_put_u32le(end + 4, y->deleted);
-        if (wl_peer_send(a->peer, y->ch, WL_SYNC_NEED_END, end, sizeof(end)) == WL_OK)
+        if (wl_peer_send(c->peer, y->ch, WL_SYNC_NEED_END, end, sizeof(end)) == WL_OK)
             y->manifest_done = 2; /* sent */
     }
 }
 
-static void open_sync(struct agent *a, uint16_t ch, const uint8_t *args, size_t n)
+static void open_sync(struct conn *c, uint16_t ch, const uint8_t *args, size_t n)
 {
     struct wl_rbuf r;
     const char *root;
     size_t root_n;
-    struct sync *y = &a->sync;
+    struct sync *y = &c->sync;
 
     wl_rbuf_init(&r, args, n);
     root = wl_r_str(&r, &root_n);
     if (r.bad || root_n == 0 || root_n >= WL_PATH_MAX - 64) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_PATH, "bad sync root");
+        (void)wl_peer_reject(c->peer, ch, WL_E_PATH, "bad sync root");
         return;
     }
     if (y->active) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_PROCESS, "a sync is already running");
+        (void)wl_peer_reject(c->peer, ch, WL_E_PROCESS, "a sync is already running");
         return;
     }
     memset(y, 0, sizeof(*y));
@@ -1310,45 +1363,45 @@ static void open_sync(struct agent *a, uint16_t ch, const uint8_t *args, size_t 
     y->root[root_n] = '\0';
     y->flags = wl_r_u8(&r);
     if ((y->flags & WL_SYNC_DRY_RUN) == 0 && wl_fs_mkdir_p(y->root) != WL_OK) {
-        (void)wl_peer_reject(a->peer, ch, WL_E_ACCESS, wl_error());
+        (void)wl_peer_reject(c->peer, ch, WL_E_ACCESS, wl_error());
         memset(y, 0, sizeof(*y));
         return;
     }
-    if (wl_peer_accept(a->peer, ch) != WL_OK) {
+    if (wl_peer_accept(c->peer, ch) != WL_OK) {
         memset(y, 0, sizeof(*y));
         return;
     }
     y->active = 1;
     y->ch = ch;
-    log_line(a, "sync: ", y->root);
-    emit_work(a, ch, WL_KIND_SYNC, y->root, 0);
+    log_line(c, "sync: ", y->root);
+    emit_work(c, ch, WL_KIND_SYNC, y->root, 0);
 }
 
 static void on_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args, size_t n)
 {
-    struct agent *a = ctx;
+    struct conn *c = ctx;
 
     switch (kind) {
     case WL_KIND_EXEC:
-        open_exec(a, ch, args, n);
+        open_exec(c, ch, args, n);
         break;
     case WL_KIND_PUT:
-        open_put(a, ch, args, n);
+        open_put(c, ch, args, n);
         break;
     case WL_KIND_GET:
-        open_get(a, ch, args, n);
+        open_get(c, ch, args, n);
         break;
     case WL_KIND_SYNC:
-        open_sync(a, ch, args, n);
+        open_sync(c, ch, args, n);
         break;
     default:
-        (void)wl_peer_reject(a->peer, ch, WL_E_UNKNOWN, "operation not supported");
+        (void)wl_peer_reject(c->peer, ch, WL_E_UNKNOWN, "operation not supported");
         break;
     }
 }
 
 /* Queues FAIL and stops the transfer; the temporary file goes too. */
-static void xfer_fail(struct agent *a, struct xfer *x, uint16_t code, const char *msg)
+static void xfer_fail(struct conn *c, struct xfer *x, uint16_t code, const char *msg)
 {
     uint8_t buf[256];
     struct wl_wbuf w;
@@ -1357,8 +1410,8 @@ static void xfer_fail(struct agent *a, struct xfer *x, uint16_t code, const char
     wl_wbuf_init(&w, buf, sizeof(buf));
     wl_w_u16(&w, code);
     wl_w_str(&w, msg, n < 200 ? n : 200);
-    (void)wl_peer_send(a->peer, x->ch, WL_FILE_FAIL, buf, w.len);
-    log_line(a, "transfer failed: ", msg);
+    (void)wl_peer_send(c->peer, x->ch, WL_FILE_FAIL, buf, w.len);
+    log_line(c, "transfer failed: ", msg);
     x->failed = 1;
     x->finished = 1;
     if (x->f != NULL) {
@@ -1369,11 +1422,11 @@ static void xfer_fail(struct agent *a, struct xfer *x, uint16_t code, const char
         (void)wl_fs_remove(x->tmp);
 }
 
-static void put_end(struct agent *a, struct xfer *x, uint32_t want_crc)
+static void put_end(struct conn *c, struct xfer *x, uint32_t want_crc)
 {
     if (fclose(x->f) != 0) {
         x->f = NULL;
-        xfer_fail(a, x, WL_E_DISK_FULL, "cannot finish writing the file");
+        xfer_fail(c, x, WL_E_DISK_FULL, "cannot finish writing the file");
         return;
     }
     x->f = NULL;
@@ -1385,7 +1438,7 @@ static void put_end(struct agent *a, struct xfer *x, uint32_t want_crc)
 
         (void)snprintf(msg, sizeof(msg), "wrong number of bytes: expected %llu, received %llu",
                        (unsigned long long)x->size, (unsigned long long)x->done);
-        xfer_fail(a, x, WL_E_CRC, msg);
+        xfer_fail(c, x, WL_E_CRC, msg);
         return;
     }
     if (x->crc != want_crc) {
@@ -1395,55 +1448,55 @@ static void put_end(struct agent *a, struct xfer *x, uint32_t want_crc)
                        "checksum mismatch over %llu bytes: sent %08lx, received %08lx",
                        (unsigned long long)x->done, (unsigned long)want_crc,
                        (unsigned long)x->crc);
-        xfer_fail(a, x, WL_E_CRC, msg);
+        xfer_fail(c, x, WL_E_CRC, msg);
         return;
     }
     if (wl_fs_replace(x->tmp, x->path) != WL_OK) {
-        xfer_fail(a, x, WL_E_ACCESS, wl_error());
+        xfer_fail(c, x, WL_E_ACCESS, wl_error());
         return;
     }
     x->tmp[0] = '\0';
     /* A failure to set the time does not invalidate the contents, but sync
      * would then copy the file again, so it is worth reporting. */
     if (x->mtime != 0 && wl_fs_set_mtime(x->path, x->mtime) != WL_OK)
-        log_line(a, "warning: ", wl_error());
-    (void)wl_peer_send(a->peer, x->ch, WL_FILE_DONE, NULL, 0);
+        log_line(c, "warning: ", wl_error());
+    (void)wl_peer_send(c->peer, x->ch, WL_FILE_DONE, NULL, 0);
     x->finished = 1;
 }
 
-static void on_xfer_record(struct agent *a, struct xfer *x, uint8_t type,
+static void on_xfer_record(struct conn *c, struct xfer *x, uint8_t type,
                            const uint8_t *p, size_t n)
 {
     if (x->failed || x->kind != WL_KIND_PUT)
         return;
     if (type == WL_FILE_DATA) {
         if (x->done + n > x->size) {
-            xfer_fail(a, x, WL_E_CRC, "more data than the file announced");
+            xfer_fail(c, x, WL_E_CRC, "more data than the file announced");
             return;
         }
         if (n > 0 && fwrite(p, 1, n, x->f) != n) {
-            xfer_fail(a, x, WL_E_DISK_FULL, "cannot write the file");
+            xfer_fail(c, x, WL_E_DISK_FULL, "cannot write the file");
             return;
         }
         x->crc = wl_crc32(x->crc, p, n);
         x->done += n;
     } else if (type == WL_FILE_END && n == 4) {
-        put_end(a, x, wl_get_u32le(p));
+        put_end(c, x, wl_get_u32le(p));
     }
 }
 
 static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, size_t n)
 {
-    struct agent *a = ctx;
-    struct exec *e = find_exec(a, ch);
-    struct xfer *x = find_xfer(a, ch);
+    struct conn *c = ctx;
+    struct exec *e = find_exec(c, ch);
+    struct xfer *x = find_xfer(c, ch);
 
-    if (a->sync.active && a->sync.ch == ch) {
-        on_sync_record(a, &a->sync, type, p, n);
+    if (c->sync.active && c->sync.ch == ch) {
+        on_sync_record(c, &c->sync, type, p, n);
         return;
     }
     if (x != NULL) {
-        on_xfer_record(a, x, type, p, n);
+        on_xfer_record(c, x, type, p, n);
         return;
     }
     if (e == NULL)
@@ -1467,35 +1520,35 @@ static void on_record(void *ctx, uint16_t ch, uint8_t type, const uint8_t *p, si
         if (!e->cancelled) {
             e->cancelled = 1;
             wl_proc_kill(e->proc);
-            log_line(a, "exec: cancelled by the client", "");
+            log_line(c, "exec: cancelled by the client", "");
         }
     }
 }
 
 static void on_closed(void *ctx, uint16_t ch)
 {
-    struct agent *a = ctx;
-    struct exec *e = find_exec(a, ch);
-    struct xfer *x = find_xfer(a, ch);
+    struct conn *c = ctx;
+    struct exec *e = find_exec(c, ch);
+    struct xfer *x = find_xfer(c, ch);
 
     /* The client hung up on a running command (Ctrl-C on its side). */
     if (e != NULL && !e->close_sent) {
-        (void)wl_peer_close(a->peer, ch);
-        end_exec(a, e);
+        (void)wl_peer_close(c->peer, ch);
+        end_exec(c, e);
     }
     if (x != NULL) {
-        (void)wl_peer_close(a->peer, ch);
-        end_xfer(a, x, 0);
+        (void)wl_peer_close(c->peer, ch);
+        end_xfer(c, x, 0);
     }
-    if (a->sync.active && a->sync.ch == ch) {
-        (void)wl_peer_close(a->peer, ch);
-        sync_end(a, &a->sync);
+    if (c->sync.active && c->sync.ch == ch) {
+        (void)wl_peer_close(c->peer, ch);
+        sync_end(c, &c->sync);
     }
 }
 
 static void on_error(void *ctx, uint16_t code, const char *msg, size_t n)
 {
-    struct agent *a = ctx;
+    struct conn *c = ctx;
     char buf[256];
 
     (void)code;
@@ -1503,7 +1556,7 @@ static void on_error(void *ctx, uint16_t code, const char *msg, size_t n)
         n = sizeof(buf) - 1;
     memcpy(buf, msg, n);
     buf[n] = '\0';
-    log_line(a, "session error: ", buf);
+    log_line(c, "session error: ", buf);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1536,7 +1589,7 @@ static size_t exec_output(struct exec *e, int s, int stream, int *eof)
     return n;
 }
 
-static void service_exec(struct agent *a, struct exec *e)
+static void service_exec(struct conn *c, struct exec *e)
 {
     static const uint8_t types[2] = {WL_EXEC_STDOUT, WL_EXEC_STDERR};
     static const int streams[2] = {WL_PROC_STDOUT, WL_PROC_STDERR};
@@ -1555,11 +1608,11 @@ static void service_exec(struct agent *a, struct exec *e)
             uint8_t buf[4];
 
             wl_put_u32le(buf, WL_EXEC_EXIT_CANCELLED);
-            if (wl_peer_send(a->peer, e->ch, WL_EXEC_EXIT, buf, sizeof(buf)) == WL_OK)
+            if (wl_peer_send(c->peer, e->ch, WL_EXEC_EXIT, buf, sizeof(buf)) == WL_OK)
                 e->exit_sent = 1;
         }
-        if (e->exit_sent && wl_peer_close(a->peer, e->ch) == WL_OK)
-            end_exec(a, e);
+        if (e->exit_sent && wl_peer_close(c->peer, e->ch) == WL_OK)
+            end_exec(c, e);
         return;
     }
 
@@ -1569,7 +1622,7 @@ static void service_exec(struct agent *a, struct exec *e)
 
             memmove(e->stdin_q, e->stdin_q + n, e->stdin_len - n);
             e->stdin_len -= n;
-            wl_peer_consumed(a->peer, e->ch, n);
+            wl_peer_consumed(c->peer, e->ch, n);
         }
         if (e->stdin_eof && e->stdin_len == 0) {
             wl_proc_close_stdin(e->proc);
@@ -1580,7 +1633,7 @@ static void service_exec(struct agent *a, struct exec *e)
     for (int s = 0; s < 2; s++) {
         while (!e->eof[s] || e->pend_len[s] > 0) {
             if (e->pend_len[s] > 0) {
-                size_t n = wl_peer_write(a->peer, e->ch, types[s], e->pend[s], e->pend_len[s]);
+                size_t n = wl_peer_write(c->peer, e->ch, types[s], e->pend[s], e->pend_len[s]);
 
                 memmove(e->pend[s], e->pend[s] + n, e->pend_len[s] - n);
                 e->pend_len[s] -= n;
@@ -1598,7 +1651,7 @@ static void service_exec(struct agent *a, struct exec *e)
 
     if (e->out_total != e->reported) {
         e->reported = e->out_total;
-        emit_progress(a, e->ch, e->out_total);
+        emit_progress(c, e->ch, e->out_total);
     }
     if (!e->exited)
         e->exited = e->proc != NULL ? wl_proc_exited(e->proc, &e->code) : 1;
@@ -1609,18 +1662,18 @@ static void service_exec(struct agent *a, struct exec *e)
             uint8_t buf[4];
 
             wl_put_u32le(buf, e->code);
-            if (wl_peer_send(a->peer, e->ch, WL_EXEC_EXIT, buf, sizeof(buf)) == WL_OK)
+            if (wl_peer_send(c->peer, e->ch, WL_EXEC_EXIT, buf, sizeof(buf)) == WL_OK)
                 e->exit_sent = 1;
         }
-        if (e->exit_sent && !e->close_sent && wl_peer_close(a->peer, e->ch) == WL_OK) {
+        if (e->exit_sent && !e->close_sent && wl_peer_close(c->peer, e->ch) == WL_OK) {
             e->close_sent = 1;
-            end_exec(a, e);
+            end_exec(c, e);
         }
     }
 }
 
 /* Streams a GET out, and closes either kind of transfer once it is over. */
-static void service_xfer(struct agent *a, struct xfer *x)
+static void service_xfer(struct conn *c, struct xfer *x)
 {
     /* Both directions land in x->done, so one place reports either kind.
      * A sync has no byte count of its own to report: its channel carries a
@@ -1628,12 +1681,12 @@ static void service_xfer(struct agent *a, struct xfer *x)
      * in its own summary. */
     if (x->done != x->reported) {
         x->reported = x->done;
-        emit_progress(a, x->ch, x->done);
+        emit_progress(c, x->ch, x->done);
     }
     if (x->kind == WL_KIND_GET && !x->finished && !x->failed) {
         while (!x->at_eof || x->buf_len > 0) {
             if (x->buf_len > 0) {
-                size_t n = wl_peer_write(a->peer, x->ch, WL_FILE_DATA, x->buf, x->buf_len);
+                size_t n = wl_peer_write(c->peer, x->ch, WL_FILE_DATA, x->buf, x->buf_len);
 
                 memmove(x->buf, x->buf + n, x->buf_len - n);
                 x->buf_len -= n;
@@ -1647,7 +1700,7 @@ static void service_xfer(struct agent *a, struct xfer *x)
             x->done += x->buf_len;
             if (x->buf_len == 0) {
                 if (ferror(x->f)) {
-                    xfer_fail(a, x, WL_E_ACCESS, "cannot read the file");
+                    xfer_fail(c, x, WL_E_ACCESS, "cannot read the file");
                     return;
                 }
                 x->at_eof = 1;
@@ -1657,110 +1710,377 @@ static void service_xfer(struct agent *a, struct xfer *x)
             uint8_t crc[4];
 
             wl_put_u32le(crc, x->crc);
-            if (wl_peer_send(a->peer, x->ch, WL_FILE_END, crc, sizeof(crc)) == WL_OK)
+            if (wl_peer_send(c->peer, x->ch, WL_FILE_END, crc, sizeof(crc)) == WL_OK)
                 x->finished = 1;
         }
     }
-    if (x->finished && wl_peer_close(a->peer, x->ch) == WL_OK)
-        end_xfer(a, x, 1);
+    if (x->finished && wl_peer_close(c->peer, x->ch) == WL_OK)
+        end_xfer(c, x, 1);
 }
 
-wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
-                         uint32_t seed)
-{
-    struct agent *a = calloc(1, sizeof(*a));
-    struct wl_peer_handlers h;
-    wl_status st = WL_OK;
+/* ---------------------------------------------------------------------------
+ * connections
+ * ------------------------------------------------------------------------- */
 
-    if (a == NULL)
-        return wl_fail(WL_ERR_NOMEM, "agent: out of memory");
-    a->cfg = cfg;
-    a->t = t;
+/* Ends everything a session started, as when its client goes. */
+static void end_work(struct conn *c)
+{
+    for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
+        if (c->execs[i].active)
+            end_exec(c, &c->execs[i]);
+    }
+    for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
+        if (c->xfers[i].active)
+            end_xfer(c, &c->xfers[i], 0);
+    }
+    if (c->sync.active)
+        sync_end(c, &c->sync);
+}
+
+/*
+ * A connection to serve: the serial port (t is borrowed, name "serial") or a
+ * newly accepted TCP connection (t is taken over and closed with it). The
+ * session config is the agent's own, plus, for TCP, the link that carries the
+ * handshake and encryption, as the responder.
+ */
+static struct conn *conn_new(struct agent *ag, struct wl_transport *t, int is_tcp,
+                             const char *name)
+{
+    struct conn *c = calloc(1, sizeof(*c));
+    struct wl_peer_handlers h;
+    struct conn **tail;
+
+    if (c == NULL) {
+        (void)wl_fail(WL_ERR_NOMEM, "agent: out of memory");
+        return NULL;
+    }
+    c->ag = ag;
+    c->is_tcp = is_tcp;
+    (void)snprintf(c->name, sizeof(c->name), "%s", name);
+    c->scfg = ag->cfg->session;
+    if (is_tcp) {
+        c->owned = *t;
+        c->t = &c->owned;
+        wl_tcplink_cfg_init(&c->tcfg);
+        c->tcfg.initiator = 0;
+        c->tcfg.psk = ag->tcp->psk;
+        c->scfg.make_link = wl_tcplink_make;
+        c->scfg.make_link_arg = &c->tcfg;
+    } else {
+        c->t = t;
+    }
     memset(&h, 0, sizeof(h));
-    h.ctx = a;
+    h.ctx = c;
     h.session = on_session;
     h.ready = on_ready;
     h.open = on_open;
     h.record = on_record;
     h.closed = on_closed;
     h.error = on_error;
-    a->peer = wl_peer_new(&cfg->session, seed, 0, 0, cfg->platform, &h);
-    if (a->peer == NULL) {
-        free(a);
-        return WL_ERR_NOMEM;
+    c->peer = wl_peer_new(&c->scfg, ag->seed++, 0, 0, ag->cfg->platform, &h);
+    if (c->peer == NULL) {
+        free(c);
+        return NULL;
     }
-    while ((cfg->stop == NULL || !cfg->stop(cfg->stop_ctx)) && !a->stopping) {
-        st = wl_peer_pump(a->peer, t, LOOP_MS);
-        if (st == WL_ERR_CORRUPT) {
-            /* The client's stream did not decompress: a mismatched build.
-             * Keep serving; the next client starts a fresh session. Logged
-             * once, since every pump of this session will say the same. */
-            uint32_t gen = wl_session_generation(wl_peer_session(a->peer));
+    /* Appended, so the serial session is always first and a log reads in
+     * the order clients arrived. */
+    for (tail = &ag->conns; *tail != NULL; tail = &(*tail)->next)
+        ;
+    *tail = c;
+    if (is_tcp)
+        ag->tcp_conns++;
+    return c;
+}
 
-            if (gen != a->reported_gen) {
-                a->reported_gen = gen;
-                log_line(a, "session error: ", wl_error());
-            }
-            st = WL_OK;
-        }
-        if (st != WL_OK)
-            break;
-        /*
-         * A client that goes away is noticed by the link rather than by a
-         * handler, so the departure is a transition to watch for here. Without
-         * it a display would show the last client as attached forever.
-         */
-        if (wl_peer_ready(a->peer) != a->was_ready) {
-            a->was_ready = !a->was_ready;
-            if (!a->was_ready) {
-                log_line(a, "session: the client is gone", "");
-                emit_at(a, WL_EV_GONE, 0, 0);
-            }
-        }
-        for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-            if (a->execs[i].active)
-                service_exec(a, &a->execs[i]);
-        }
-        for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
-            if (a->xfers[i].active)
-                service_xfer(a, &a->xfers[i]);
-        }
-        if (a->sync.active)
-            service_sync(a, &a->sync);
-        reap(a);
+static void conn_free(struct conn *c)
+{
+    end_work(c);
+    wl_peer_free(c->peer);
+    if (c->is_tcp) {
+        wl_transport_close(&c->owned);
+        c->ag->tcp_conns--;
     }
-    if (a->stopping && st == WL_OK) {
-        /* Give the acknowledgement of @stop time to reach the client, so it
-         * sees the command succeed rather than the link dying. */
-        uint32_t linger = wl_clock_ms();
+    free(c);
+}
 
-        while (!wl_peer_idle(a->peer) && wl_clock_since(linger) < 3000U) {
-            if (wl_peer_pump(a->peer, t, LOOP_MS) != WL_OK)
-                break;
+/*
+ * One pass over one connection: its link and session, then the work it has
+ * running. Returns WL_OK to keep serving it, or the reason it has ended.
+ */
+static wl_status conn_pump(struct conn *c, uint32_t wait_ms)
+{
+    wl_status st = wl_peer_pump(c->peer, c->t, wait_ms);
+
+    if (st == WL_ERR_CORRUPT && !c->is_tcp) {
+        /* The client's stream did not decompress: a mismatched build. Keep
+         * serving; the next client starts a fresh session. Logged once,
+         * since every pump of this session will say the same. On TCP there
+         * is no next session on the connection, so it simply ends. */
+        uint32_t gen = wl_session_generation(wl_peer_session(c->peer));
+
+        if (gen != c->reported_gen) {
+            c->reported_gen = gen;
+            log_line(c, "session error: ", wl_error());
+        }
+        st = WL_OK;
+    }
+    if (st != WL_OK)
+        return st;
+    /*
+     * A client that goes away is noticed by the link rather than by a
+     * handler, so the departure is a transition to watch for here. Without
+     * it a display would show the last client as attached forever.
+     */
+    if (wl_peer_ready(c->peer) != c->was_ready) {
+        c->was_ready = !c->was_ready;
+        if (!c->was_ready) {
+            log_line(c, "session: the client is gone", "");
+            emit_at(c, WL_EV_GONE, 0, 0);
         }
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_EXEC; i++) {
-        if (a->execs[i].active)
-            end_exec(a, &a->execs[i]);
+        if (c->execs[i].active)
+            service_exec(c, &c->execs[i]);
     }
     for (unsigned i = 0; i < WL_AGENT_MAX_XFER; i++) {
-        if (a->xfers[i].active)
-            end_xfer(a, &a->xfers[i], 0);
+        if (c->xfers[i].active)
+            service_xfer(c, &c->xfers[i]);
     }
-    if (a->sync.active)
-        sync_end(a, &a->sync);
+    if (c->sync.active)
+        service_sync(c, &c->sync);
+    return WL_OK;
+}
+
+/* The address part of "a.b.c.d:port". */
+static void host_of(const char *peer, char *out, size_t cap)
+{
+    const char *colon = strrchr(peer, ':');
+    size_t n = colon != NULL ? (size_t)(colon - peer) : strlen(peer);
+
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, peer, n);
+    out[n] = '\0';
+}
+
+/*
+ * A wrong passphrase costs the address a pause (docs/protocol.md,
+ * "Handshake"): connections from it are closed unanswered for the next 2 s,
+ * so guessing runs at a pace that makes a real passphrase safe. The oldest
+ * entry makes way when the table is full.
+ */
+static void penalise(struct agent *ag, const char *peer)
+{
+    struct penalty *slot = &ag->penalties[0];
+    uint32_t now = wl_clock_ms();
+
+    for (unsigned i = 0; i < MAX_PENALTIES; i++) {
+        struct penalty *p = &ag->penalties[i];
+
+        if (p->addr[0] == '\0' || (int32_t)(now - p->until) >= 0) {
+            slot = p;
+            break;
+        }
+        if ((int32_t)(p->until - slot->until) < 0)
+            slot = p;
+    }
+    host_of(peer, slot->addr, sizeof(slot->addr));
+    slot->until = now + PENALTY_MS;
+}
+
+static int penalised(const struct agent *ag, const char *peer)
+{
+    char host[64];
+    uint32_t now = wl_clock_ms();
+
+    host_of(peer, host, sizeof(host));
+    for (unsigned i = 0; i < MAX_PENALTIES; i++) {
+        const struct penalty *p = &ag->penalties[i];
+
+        if (p->addr[0] != '\0' && (int32_t)(now - p->until) < 0 && strcmp(p->addr, host) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* A TCP connection has ended: its session and its work go with it. why is
+ * what ended it; a handshake that failed to authenticate costs the address
+ * the pause above. */
+static void conn_ended(struct conn *c, wl_status why)
+{
+    if (why == WL_ERR_CORRUPT && !wl_session_is_up(wl_peer_session(c->peer)) &&
+        wl_session_generation(wl_peer_session(c->peer)) == 0)
+        penalise(c->ag, c->name);
+    log_line(c, "session ended: ", wl_error());
+    if (c->was_ready)
+        emit_at(c, WL_EV_GONE, 0, 0);
+    emit_at(c, WL_EV_DISCONNECTED, 0, 0);
+}
+
+/* Takes every connection waiting on the listener. */
+static void accept_waiting(struct agent *ag)
+{
+    for (;;) {
+        struct wl_transport t;
+        char peer[64];
+        struct conn *c;
+
+        t.ops = NULL;
+        t.impl = NULL;
+        peer[0] = '\0';
+        if (ag->tcp->accept(ag->tcp->ctx, &t, peer, sizeof(peer)) != WL_OK || t.ops == NULL)
+            return;
+        if (penalised(ag, peer)) {
+            wl_transport_close(&t);
+            continue;
+        }
+        if (ag->tcp_conns >= WL_AGENT_MAX_CONN) {
+            /* Refused at once rather than queued: a client that cannot be
+             * served should hear so now, not after its handshake times out. */
+            if (ag->cfg->log != NULL) {
+                char buf[128];
+
+                (void)snprintf(buf, sizeof(buf), "[%s] refused: %u TCP sessions already", peer,
+                               WL_AGENT_MAX_CONN);
+                ag->cfg->log(ag->cfg->log_ctx, buf);
+            }
+            wl_transport_close(&t);
+            continue;
+        }
+        c = conn_new(ag, &t, 1, peer);
+        if (c == NULL) {
+            wl_transport_close(&t);
+            return;
+        }
+        log_line(c, "connected", "");
+        emit_at(c, WL_EV_CONNECTED, 0, 0);
+    }
+}
+
+/*
+ * Waits until any connection or the listener has input, a link timer is due,
+ * or LOOP_MS passes, which also paces the commands' output and the reaper.
+ */
+static void wait_for_input(struct agent *ag)
+{
+    int fds[WL_AGENT_MAX_CONN + 2U];
+    size_t n = 0;
+    int unwaitable = 0;
+    uint32_t wait = LOOP_MS;
+    uint32_t now = wl_clock_ms();
+
+    for (struct conn *c = ag->conns; c != NULL; c = c->next) {
+        struct wl_linkif *l = wl_session_linkif(wl_peer_session(c->peer));
+        uint32_t due = l->ops->next_timeout(l->impl, now);
+        int fd = wl_transport_fd(c->t);
+
+        if (due < wait)
+            wait = due;
+        if (fd < 0)
+            unwaitable = 1;
+        else if (n < sizeof(fds) / sizeof(fds[0]))
+            fds[n++] = fd;
+    }
+    if (ag->tcp != NULL) {
+        if (ag->tcp->fd < 0)
+            unwaitable = 1;
+        else if (n < sizeof(fds) / sizeof(fds[0]))
+            fds[n++] = ag->tcp->fd;
+    }
+    if (wait > 0)
+        wl_wait_any(fds, n, unwaitable, wait);
+}
+
+wl_status wl_agent_run(struct wl_transport *serial, const struct wl_agent_listener *tcp,
+                       const struct wl_agent_cfg *cfg, uint32_t seed)
+{
+    struct agent *ag;
+    wl_status st = WL_OK;
+
+    if (serial == NULL && tcp == NULL)
+        return wl_fail(WL_ERR_INVAL, "agent: nothing to serve on");
+    if (tcp != NULL && tcp->psk == NULL)
+        return wl_fail(WL_ERR_INVAL, "agent: no passphrase, so no TCP");
+    ag = calloc(1, sizeof(*ag));
+    if (ag == NULL)
+        return wl_fail(WL_ERR_NOMEM, "agent: out of memory");
+    ag->cfg = cfg;
+    ag->tcp = tcp;
+    ag->seed = seed;
+    if (serial != NULL && conn_new(ag, serial, 0, "serial") == NULL) {
+        free(ag);
+        return WL_ERR_NOMEM;
+    }
+    while ((cfg->stop == NULL || !cfg->stop(cfg->stop_ctx)) && !ag->stopping) {
+        /* Serial alone is served exactly as it always was: the pump itself
+         * waits on the port. Anything more waits on everything at once. */
+        int alone = tcp == NULL && ag->conns != NULL && ag->conns->next == NULL;
+        struct conn **link = &ag->conns;
+
+        if (tcp != NULL)
+            accept_waiting(ag);
+        while (*link != NULL) {
+            struct conn *c = *link;
+
+            st = conn_pump(c, alone ? LOOP_MS : 0);
+            if (st != WL_OK && c->is_tcp) {
+                conn_ended(c, st);
+                *link = c->next;
+                conn_free(c);
+                st = WL_OK;
+                continue;
+            }
+            if (st != WL_OK)
+                break;
+            link = &c->next;
+        }
+        if (st != WL_OK)
+            break;
+        reap(ag);
+        if (!alone)
+            wait_for_input(ag);
+    }
+    if (ag->stopping && st == WL_OK) {
+        /* Give the acknowledgement of @stop time to reach the client, so it
+         * sees the command succeed rather than the link dying. Every other
+         * session simply ends with the agent. */
+        uint32_t linger = wl_clock_ms();
+        int idle = 0;
+
+        while (!idle && wl_clock_since(linger) < 3000U) {
+            idle = 1;
+            for (struct conn *c = ag->conns; c != NULL; c = c->next) {
+                if (!wl_peer_idle(c->peer) &&
+                    wl_peer_pump(c->peer, c->t, ag->conns->next == NULL ? LOOP_MS : 0) == WL_OK)
+                    idle = 0;
+            }
+            if (!idle && ag->conns != NULL && ag->conns->next != NULL)
+                wait_for_input(ag);
+        }
+    }
+    while (ag->conns != NULL) {
+        struct conn *c = ag->conns;
+
+        ag->conns = c->next;
+        conn_free(c);
+    }
     /* Shutting down is the one place that waits for a child at all, and even
      * there the wait is bounded: a child that will not go is abandoned rather
      * than forced, so the agent always reaches its exit and its launcher can
      * start the replacement. */
-    while (a->reaping != NULL) {
-        struct reaping *r = a->reaping;
+    while (ag->reaping != NULL) {
+        struct reaping *r = ag->reaping;
 
-        a->reaping = r->next;
+        ag->reaping = r->next;
         wl_proc_free(r->proc);
         free(r);
     }
-    wl_peer_free(a->peer);
-    free(a);
+    free(ag);
     return st;
+}
+
+wl_status wl_agent_serve(struct wl_transport *t, const struct wl_agent_cfg *cfg,
+                         uint32_t seed)
+{
+    return wl_agent_run(t, NULL, cfg, seed);
 }

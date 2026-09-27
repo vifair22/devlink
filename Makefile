@@ -49,7 +49,8 @@ AGENTW_SOURCES := $(AGENTW_ENTRY) $(AGENT_SHARED)
 # The Linux agent: the same core over the POSIX layer, minus what only the
 # client uses (the multiplexer and its socket).
 LINUX_AGENT_SOURCES := $(CORE_SOURCES) $(SRC_DIR)/linux/main.c \
-                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c random.c serial.c tcp.c)
+                       $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c random.c serial.c tcp.c \
+                       wait.c)
 
 # Vendored zlib: built once with its own flags into an archive, never subject
 # to this project's warnings, analysis or coverage (third_party/zlib/VENDORED.md).
@@ -331,6 +332,9 @@ $(TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 $(BIN_DIR)/test_%: $(TEST_DIR)/test_%.c $(TEST_LIB_OBJS) $(TEST_DEPS) $(VENDOR_LIBS) | $(BIN_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=debug $(CFLAGS_COMMON) $(DEBUG_FLAGS) \
 	    -pthread -I$(TEST_DIR) -o $@ $< $(TEST_LIB_OBJS) $(VENDOR_LIBS) -lcmocka
+
+# test_exec_tcp is test_exec.c compiled a second way, by #include.
+$(BIN_DIR)/test_exec_tcp: $(TEST_DIR)/test_exec.c
 
 test: $(TEST_BINS)
 	@fail=0; for t in $(TEST_BINS); do \
