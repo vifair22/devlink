@@ -225,16 +225,145 @@ static void test_a_message_is_held_until_it_is_whole(void **state)
     free_pair(&p);
 }
 
-static void test_a_key_is_refused_until_encryption_exists(void **state)
+/* ---------------------------------------------------------------------------
+ * with a key
+ * ------------------------------------------------------------------------- */
+
+static const uint8_t key_a[32] = {0x42, 1, 2, 3};
+static const uint8_t key_b[32] = {0x42, 1, 2, 4};
+
+static void make_keyed(struct pair *p, const uint8_t *ka, const uint8_t *kb)
 {
-    static const uint8_t key[32];
-    struct wl_tcplink_cfg c;
-    struct wl_linkif l;
+    struct wl_tcplink_cfg ca;
+    struct wl_tcplink_cfg cb;
+
+    memset(p, 0, sizeof(*p));
+    p->now = 1000;
+    wl_tcplink_cfg_init(&ca);
+    ca.initiator = 1;
+    ca.psk = ka;
+    cb = ca;
+    cb.initiator = 0;
+    cb.psk = kb;
+    assert_int_equal(wl_tcplink_make(&ca, 1, p->now, &p->a), WL_OK);
+    assert_int_equal(wl_tcplink_make(&cb, 2, p->now, &p->b), WL_OK);
+}
+
+static void test_handshake_brings_both_sides_up(void **state)
+{
+    struct pair p;
 
     (void)state;
-    wl_tcplink_cfg_init(&c);
-    c.psk = key;
-    assert_int_equal(wl_tcplink_make(&c, 1, 0, &l), WL_ERR_INVAL);
+    make_keyed(&p, key_a, key_a);
+    assert_false(p.a.ops->is_up(p.a.impl));
+    assert_int_equal(p.a.ops->generation(p.a.impl), 0);
+    /* Nothing can be sent before the keys exist. */
+    assert_int_equal(p.a.ops->send(p.a.impl, (const uint8_t *)"x", 1), 0);
+    step(&p, 1); /* the client's message out, the agent's answer back */
+    step(&p, 1);
+    assert_true(p.a.ops->is_up(p.a.impl));
+    assert_true(p.b.ops->is_up(p.b.impl));
+    assert_int_equal(p.a.ops->generation(p.a.impl), 1);
+    free_pair(&p);
+}
+
+static void test_encrypted_stream_both_ways(void **state)
+{
+    enum { TOTAL = 2 * 65536 + 99 };
+    static uint8_t src[TOTAL];
+    static uint8_t dst_a[TOTAL];
+    static uint8_t dst_b[TOTAL];
+    size_t sent_a = 0, sent_b = 0, got_a = 0, got_b = 0;
+    struct pair p;
+
+    (void)state;
+    for (size_t i = 0; i < TOTAL; i++)
+        src[i] = (uint8_t)(i * 7U);
+    make_keyed(&p, key_a, key_a);
+    for (int guard = 0; guard < 10000 && (got_a < TOTAL || got_b < TOTAL); guard++) {
+        sent_a += p.a.ops->send(p.a.impl, src + sent_a, TOTAL - sent_a);
+        sent_b += p.b.ops->send(p.b.impl, src + sent_b, TOTAL - sent_b);
+        step(&p, 1);
+        got_b += p.b.ops->recv(p.b.impl, dst_b + got_b, TOTAL - got_b);
+        got_a += p.a.ops->recv(p.a.impl, dst_a + got_a, TOTAL - got_a);
+    }
+    assert_int_equal(got_a, TOTAL);
+    assert_int_equal(got_b, TOTAL);
+    assert_memory_equal(dst_a, src, TOTAL);
+    assert_memory_equal(dst_b, src, TOTAL);
+    free_pair(&p);
+}
+
+static void test_plaintext_never_appears_on_the_wire(void **state)
+{
+    static const char secret[] = "the secret that must not show";
+    uint8_t wire[WL_LINKIF_WIRE];
+    size_t n;
+    struct pair p;
+
+    (void)state;
+    make_keyed(&p, key_a, key_a);
+    step(&p, 1);
+    step(&p, 1);
+    assert_int_equal(p.a.ops->send(p.a.impl, (const uint8_t *)secret, sizeof(secret)),
+                     sizeof(secret));
+    n = p.a.ops->poll_tx(p.a.impl, wire, sizeof(wire), p.now);
+    assert_int_equal(n, 2 + sizeof(secret) + 16);
+    assert_null(memmem(wire, n, "secret", 6));
+    free_pair(&p);
+}
+
+static void test_wrong_key_fails_at_the_agent(void **state)
+{
+    struct pair p;
+
+    (void)state;
+    make_keyed(&p, key_a, key_b);
+    step(&p, 1);
+    /* The agent reads the proof in the client's first message and refuses;
+     * it never answers, so the client learns nothing about the key. */
+    assert_int_equal(p.b.ops->failed(p.b.impl), WL_ERR_CORRUPT);
+    assert_false(p.b.ops->is_up(p.b.impl));
+    step(&p, 1);
+    assert_false(p.a.ops->is_up(p.a.impl));
+    free_pair(&p);
+}
+
+static void test_a_changed_byte_ends_the_session(void **state)
+{
+    uint8_t wire[WL_LINKIF_WIRE];
+    size_t n;
+    struct pair p;
+
+    (void)state;
+    make_keyed(&p, key_a, key_a);
+    step(&p, 1);
+    step(&p, 1);
+    (void)p.a.ops->send(p.a.impl, (const uint8_t *)"hello", 5);
+    n = p.a.ops->poll_tx(p.a.impl, wire, sizeof(wire), p.now);
+    assert_true(n > 4);
+    wire[4] ^= 0x01;
+    p.b.ops->rx(p.b.impl, wire, n, p.now);
+    assert_int_equal(p.b.ops->failed(p.b.impl), WL_ERR_CORRUPT);
+    assert_int_equal(p.b.ops->recv(p.b.impl, wire, sizeof(wire)), 0);
+    free_pair(&p);
+}
+
+static void test_a_handshake_that_never_finishes_times_out(void **state)
+{
+    struct pair p;
+    uint32_t start;
+
+    (void)state;
+    make_keyed(&p, key_a, key_a);
+    p.a_deaf = 1; /* the agent's answer never arrives */
+    start = p.now;
+    while (p.a.ops->failed(p.a.impl) == WL_OK && p.now - start < 20000)
+        step(&p, 100);
+    assert_int_equal(p.a.ops->failed(p.a.impl), WL_ERR_IO);
+    assert_true(p.now - start >= WL_TCPLINK_HANDSHAKE_MS);
+    assert_true(p.now - start <= WL_TCPLINK_HANDSHAKE_MS + 200);
+    free_pair(&p);
 }
 
 /* ---------------------------------------------------------------------------
@@ -252,6 +381,7 @@ static void open_end(struct end *e, int fd, int initiator)
 {
     wl_tcplink_cfg_init(&e->tcfg);
     e->tcfg.initiator = initiator;
+    e->tcfg.psk = key_a;
     wl_session_cfg_init(&e->scfg);
     e->scfg.make_link = wl_tcplink_make;
     e->scfg.make_link_arg = &e->tcfg;
@@ -288,7 +418,6 @@ static void test_session_over_a_socket(void **state)
     for (size_t i = 0; i < TOTAL; i++)
         src[i] = (uint8_t)((i * 2654435761U) >> 13);
     socket_ends(&a, &b);
-    assert_true(wl_session_is_up(a.s) || wl_session_work(a.s) == WL_OK);
     assert_null(wl_session_link(a.s));
     for (int guard = 0; guard < 100000 && got < TOTAL; guard++) {
         sent += wl_session_send(a.s, src + sent, TOTAL - sent);
@@ -327,7 +456,12 @@ int main(void)
         cmocka_unit_test(test_silent_peer_is_declared_gone),
         cmocka_unit_test(test_a_slow_reader_is_not_a_dead_peer),
         cmocka_unit_test(test_a_message_is_held_until_it_is_whole),
-        cmocka_unit_test(test_a_key_is_refused_until_encryption_exists),
+        cmocka_unit_test(test_handshake_brings_both_sides_up),
+        cmocka_unit_test(test_encrypted_stream_both_ways),
+        cmocka_unit_test(test_plaintext_never_appears_on_the_wire),
+        cmocka_unit_test(test_wrong_key_fails_at_the_agent),
+        cmocka_unit_test(test_a_changed_byte_ends_the_session),
+        cmocka_unit_test(test_a_handshake_that_never_finishes_times_out),
         cmocka_unit_test(test_session_over_a_socket),
         cmocka_unit_test(test_closed_connection_ends_the_session),
     };
