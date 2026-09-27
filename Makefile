@@ -447,7 +447,8 @@ analyze:
 # mingw headers are installed, since it must not stop the gate on a machine
 # that has none.
 WIN_TIDY_DIRS := /usr/i686-w64-mingw32/include /usr/i686-w64-mingw32/usr/include \
-                 /usr/local/i686-w64-mingw32/include
+                 /usr/local/i686-w64-mingw32/include \
+                 /usr/lib/mingw64-toolchain/x86_64-w64-mingw32/include
 WIN_TIDY_INC  := $(foreach d,$(WIN_TIDY_DIRS),$(if $(wildcard $(d)),-isystem $(d)))
 
 # One clang-tidy per core: it analyses files serially within one invocation,

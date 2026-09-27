@@ -11,7 +11,9 @@
 #
 # Several include paths are listed because distributions disagree about where
 # they go (Arch: /usr/i686-w64-mingw32/include, Gentoo crossdev:
-# /usr/i686-w64-mingw32/usr/include). clang ignores an -isystem directory that
+# /usr/i686-w64-mingw32/usr/include, Gentoo's dev-util/mingw64-toolchain,
+# the one wine pulls in: /usr/lib/mingw64-toolchain/x86_64-w64-mingw32/include,
+# whose headers serve the i686 target as well). clang ignores an -isystem directory that
 # does not exist, so listing all of them costs nothing and one file serves
 # every machine. If none is present, install mingw-w64 headers for the target.
 #
@@ -27,6 +29,8 @@ CompileFlags:
     - /usr/i686-w64-mingw32/usr/include
     - -isystem
     - /usr/local/i686-w64-mingw32/include
+    - -isystem
+    - /usr/lib/mingw64-toolchain/x86_64-w64-mingw32/include
     - -D_WIN32_WINNT=0x0500
     # InterlockedExchange((LONG *)&s->done, ...): Watcom's prototype takes a
     # plain LONG *, so the cast off the volatile field is required to compile
@@ -50,3 +54,15 @@ Diagnostics:
     Remove:
       - cert-env33-c
       - bugprone-implicit-widening-of-multiplication-result
+
+---
+# Vendored upstream code (zlib, monocypher) is taken as released and not
+# changed here, so its findings are not ours to act on; `make tidy` leaves it
+# out for the same reason. Without this an editor shows some 450 of them, and
+# the handful in our own code get lost among them.
+If:
+  PathMatch: third_party/.*
+Diagnostics:
+  Suppress: '*'
+  ClangTidy:
+    Remove: '*'
