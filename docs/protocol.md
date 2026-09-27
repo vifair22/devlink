@@ -1,7 +1,10 @@
 # devlink protocol, version 1
 
-Status: agreed in iteration 1. Implemented so far: everything except the TCP
-transport (iterations 2-8).
+Status: agreed in iteration 1; the TCP link, its encryption and serving
+several sessions at once were redesigned in iteration 9 (2026-09-27), before
+any TCP code existed, so no deployed peer speaks the earlier draft.
+Implemented so far: everything except the TCP link and its encryption
+(iterations 2-8, 11-12).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
@@ -20,8 +23,10 @@ Goals, in priority order:
 4. Run the same operations over TCP once the target has a network card, with
    no change above the link layer.
 
-Non-goals for v1: security (see "Authentication and encryption"), more than
-one client per agent, and resuming an interrupted transfer.
+Non-goals for v1: security on serial (the cable is physical access; see
+"Authentication and encryption"), and resuming an interrupted transfer. More
+than one session per agent was a non-goal until iteration 9; see "Sessions
+and transports".
 
 ## Conventions
 
@@ -42,7 +47,7 @@ flowchart TB
     ops["Operations<br/>exec, put, get, sync"]
     mux["Mux<br/>(channel, type, length) records"]
     z["Compression<br/>one raw-deflate stream per direction"]
-    link["Link<br/>serial: COBS + CRC32 + seq + sliding window<br/>TCP: u32 length prefix"]
+    link["Link<br/>serial: COBS + CRC32 + seq + sliding window<br/>TCP: Noise handshake, then u16 length + ChaCha20-Poly1305"]
     tr["Transport<br/>Win32 comm / termios, Winsock / BSD sockets"]
     ops --> mux --> z --> link --> tr
 ```
@@ -142,17 +147,97 @@ and the side returns to sending SYNC.
 
 ## Link layer: TCP
 
-TCP delivers an ordered, lossless stream, so the link layer only preserves
-frame boundaries:
+TCP delivers an ordered, lossless stream, so this layer does not add
+integrity or retransmission. What it adds is what a network needs and a
+cable does not: every TCP session is authenticated and encrypted with a key
+derived from a passphrase both sides hold, and a peer that vanishes without
+closing the connection is noticed.
+
+The agent listens on TCP port 2098 by default. It refuses to listen at all
+without a passphrase configured: there is no unauthenticated TCP.
+
+### Passphrase and key
+
+Both sides hold the same passphrase. Each derives a 32-byte key from it once,
+at startup:
 
 ```
-u32 length, then `length` bytes of payload
+psk = PBKDF2-HMAC-SHA256(passphrase, salt = "devlink psk v1", iterations = 100000, 32 bytes)
 ```
 
-No CRC, sequence numbers or retransmission. A session is one TCP connection;
-the SYNC exchange is replaced by the connection itself, and a dropped
-connection has the same effect as a peer restart on serial. `max_payload` for
-TCP is 64 KiB. The agent listens on TCP port 2098 by default.
+The iteration count is part of the protocol, since both sides must agree on
+it. 100000 is a first figure, chosen to cost about a second on a Pentium III;
+it is to be measured on the A21m and fixed before the first TCP release.
+
+Where the passphrase lives is a local matter, not wire format: the agent reads
+`DEVLINK.KEY` beside its program, the client `~/.config/devlink/key` or
+`$DEVLINK_KEY`. In each file the passphrase is the first line, without its
+line ending.
+
+### Handshake
+
+A connection starts with a Noise handshake (the Noise Protocol Framework,
+revision 34), protocol name:
+
+```
+Noise_NNpsk0_25519_ChaChaPoly_SHA256
+```
+
+- The client is the initiator, the agent the responder. Prologue: the ASCII
+  bytes `devlink 1`, so a peer speaking another protocol version cannot
+  complete it.
+- `NNpsk0` is two messages: `-> psk, e` and `<- e, ee`. Neither side has a
+  long-term key; both prove they hold `psk`, and the ephemeral X25519 exchange
+  gives each session fresh keys, so a passphrase leaked later does not
+  decrypt a recorded session.
+- Both handshake payloads are empty. Each message travels as a `u16` length
+  and the message, as transport messages do below.
+- An agent that cannot process the first message (a wrong passphrase makes
+  its authentication tag fail) closes the connection without answering, logs
+  the peer's address, and ignores that address for 2 s. A client that cannot
+  process the answer reports that the agent does not hold the same
+  passphrase. Neither side says why on the wire.
+- The handshake must complete within 10 s or the connection is closed.
+
+This is an established pattern, not a new design: the implementation follows
+the Noise specification step by step and is tested against its published test
+vectors for this protocol name before it talks to anything.
+
+### Transport messages
+
+After the handshake, each direction is a sequence of messages:
+
+```
+u16 length, then `length` bytes: ChaCha20-Poly1305(payload) with its 16-byte tag
+```
+
+- `payload` is the next piece of the compressed stream, as a serial DATA
+  frame's payload is. `length` includes the tag, so `max_payload` on TCP is
+  65519 bytes.
+- The nonce is Noise's: a 64-bit counter per direction, starting at 0. Neither
+  side can plausibly send 2^64 messages, so there is no rekeying.
+- A message that fails to authenticate ends the session. On TCP, unlike
+  serial, that cannot be line noise; it is tampering or a bug.
+- A message with an empty payload is a keepalive (below). It is encrypted and
+  authenticated like any other.
+
+### Liveness
+
+A connection that is closed is noticed at once. One whose peer lost power, or
+whose cable was pulled, is not: TCP's own keepalive waits two hours by
+default. So the serial link's timers apply here too: a side with nothing to
+send sends a keepalive every 2 s, and a side that has received nothing valid
+for 10 s closes the connection. Closing has the same effect as a peer restart
+on serial: open operations fail and the session is gone.
+
+### Why not TLS
+
+TLS would need certificates and a library of tens of thousands of lines
+brought to Open Watcom, since Windows 2000's own offers only TLS 1.0. The
+Pentium III is not the obstacle: ChaCha20-Poly1305 in portable C runs far
+faster than it can deflate. Noise with a pre-shared key has no certificates
+and fits in a few thousand lines (Monocypher, vendored, for X25519 and
+ChaCha20-Poly1305; SHA-256 is the one `sync` already uses).
 
 ## Compression layer
 
@@ -246,8 +331,10 @@ Both sides send HELLO as their first record.
   noticed, but builds with the same protocol version must interoperate.
 - `platform` is 1 for Win9x, 2 for Win NT and 3 for Linux. The client uses it
   to choose `command.com` or `cmd.exe` for `exec` and to adjust path rules.
-- `capabilities` is a bitmask. Bit 0 is reserved for authentication and must be
-  0 in v1. Unknown bits are ignored.
+- `capabilities` is a bitmask. Bit 0 is set when the session is authenticated
+  and encrypted, which is true of every TCP session and no serial one; it is
+  informational, since the link layer has already enforced it. Unknown bits
+  are ignored.
 
 No operation may be opened before both HELLOs have been exchanged.
 
@@ -474,18 +561,34 @@ and above are operation errors.
 
 ## Authentication and encryption
 
-Out of scope for v1: the intended use is old machines on private LANs and a
-direct serial cable. The protocol leaves room for adding them without a version
-bump:
+On TCP, always: see "Link layer: TCP". On serial, never: the cable is
+physical access to the machine, and the serial link stays as it is.
 
-- capability bit 0 announces authentication support;
-- an AUTH exchange would sit between HELLO and the first OPEN;
-- encryption would be a layer between compression and link, negotiated the
-  same way.
+What the TCP design protects: nobody without the passphrase can run commands,
+read the traffic or change it, and a recorded session stays unreadable if the
+passphrase leaks later. What it does not: anyone with the passphrase is fully
+trusted, as a serial user is; there is one passphrase per agent, not one per
+user; and a wrong passphrase is only slowed down by the 2 s pause, so it must
+not be a guessable one.
 
-Until then, anyone who can reach the agent's TCP port can run commands on the
-target as whoever started the agent. The agent will say so in its startup
-banner when TCP is enabled.
+## Sessions and transports
+
+An agent serves its serial port and its TCP listener at the same time, and any
+number of sessions at once: one on serial, and one for each TCP connection. A
+session belongs to the connection that started it. Everything it sends goes
+back over that connection and no other: a serial session is answered on the
+serial port, a TCP session on its own socket (and so from the local address
+the client reached, on a machine with more than one).
+
+Sessions are independent, as clients of the local multiplexer are: each has
+its own channels, compression streams and credit. What they share is the
+agent: its eight EXEC slots, first come first served across all sessions, and
+its file system, with no locking between sessions, as there is none between
+two commands on one session today.
+
+`@stop` stops the agent, and so ends every session, not only the one that
+asked. The others see their connection close, or the serial link go quiet,
+exactly as they would if the agent had crashed.
 
 ## Open questions
 

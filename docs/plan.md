@@ -15,10 +15,52 @@ is only needed once there is an agent feature to try.
 | 6 | Channels and `exec` with streamed output | done: `devlink exec` runs commands on the A21m |
 | 7 | `put` / `get` | done: files round-trip byte-exact; the agent updates itself |
 | 8 | `sync`: hash manifests, send only changed files | done: 50-file tree, no changes, syncs in 0.25 s |
-| 9 | TCP transport | same features over the new NIC |
+| 9 | TCP transport, encrypted, served beside serial | same features over the new NIC, several sessions at once |
 | 10 | Windows 2000 pass | full suite against a 2000 agent, and the NT-only improvements below |
 | 11 | Local multiplexer | several commands at once from separate terminals, over one session |
 | 12 | A window instead of a console | the agent runs as a real Win32 window on the A21m, showing what it is doing now |
+
+## Iteration 9: TCP, encrypted, beside serial
+
+Decided 2026-09-27; `docs/protocol.md` has the wire format ("Link layer:
+TCP", "Sessions and transports"). The user's choices:
+
+- **Both at once.** The agent serves serial and TCP together, and any number
+  of sessions, the way the local multiplexer serves several clients over one
+  line. Each session is answered over the connection it came in on.
+- **Encrypted from the first release.** Noise `NNpsk0` with a key from a
+  pre-shared passphrase: no certificates, forward secrecy, ChaCha20-Poly1305.
+  TLS was considered and turned down for its size and its certificates, not
+  for the Pentium III's speed.
+- **No passphrase on serial.** The cable is physical access.
+- **Passphrase files:** `DEVLINK.KEY` beside the agent, `~/.config/devlink/key`
+  or `$DEVLINK_KEY` on the client. The agent will not listen without one.
+- **The agent's window shows TCP:** the listening port and each connected
+  client's address.
+
+The network card for the A21m is delayed in shipping, so everything up to the
+last step is proved on Linux over 127.0.0.1, and on Windows 2000 in QEMU with
+a virtual NIC (the runbook's image, started with `-nic user` instead of
+`-nic none`).
+
+Steps, each committed only when the gates pass:
+
+| Step | Work | Done when |
+|------|------|-----------|
+| 9a | A link interface in `session.c`: the serial link becomes one implementation of a small table of operations (send, recv, is_up, generation, unacked, pump) | every existing test passes unchanged; no behaviour change |
+| 9b | The TCP link: `u16`-length messages, keepalive and 10 s dead timer, unencrypted for now and only reachable from tests | the session and `exec` tests run over a socketpair as well as the simulated serial line |
+| 9c | Noise: vendored Monocypher, HMAC and PBKDF2 over the existing SHA-256, the `NNpsk0` handshake and transport messages | Noise's published vectors for `Noise_NNpsk0_25519_ChaChaPoly_SHA256` pass; tampered and wrong-key sessions fail as specified |
+| 9d | Transports and addressing: POSIX TCP connect for the client, Winsock 1.1 listen/accept for the agent (`wsock32`, present on 98 and 2000), `DEVLINK_LINE=tcp:HOST[:PORT]`, the multiplexer naming its socket for a TCP target | the Linux client runs `exec`, `put`, `get` and `sync` against the Linux agent over TCP |
+| 9e | Several sessions in the agent: serial and every TCP connection served at once, EXEC slots shared, `@stop` ending all of them | a test holds a serial session and two TCP sessions open, runs a command on each, and each output arrives whole on its own connection only |
+| 9f | The window: TCP listener and connected clients | shown on the A21m (or the 2000 VM) |
+| 9g | Measure and fix the PBKDF2 iteration count on the A21m; set the TCP deflate level from measured throughput | numbers recorded here; the protocol's figure made final |
+| 9h | On the A21m, once the card is fitted | the full suite over TCP, beside a serial session |
+
+Open for 9e, to decide when it is built: how the Win32 agent waits on serial
+and sockets together. `select()` covers only sockets there, and a serial
+handle cannot join it; the likely shape is one reader thread per connection
+posting to the main loop, as the pipe readers already do, but that is to be
+settled in the code, not here.
 
 ## Iteration 11: running more than one command at a time
 
