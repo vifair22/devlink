@@ -7,18 +7,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "devlink/client_exec.h"
 #include "devlink/clock.h"
 #include "devlink/file_ops.h"
+#include "devlink/keyfile.h"
 #include "devlink/echo.h"
 #include "devlink/linktest.h"
 #include "devlink/mux.h"
 #include "devlink/usock.h"
 #include "devlink/proto.h"
 #include "devlink/sync.h"
+#include "devlink/tcp.h"
+#include "devlink/tcplink.h"
 #include "devlink/transport.h"
 #include "devlink/version.h"
 
@@ -51,7 +55,8 @@ static const char *const help_echo =
     "\n"
     "Sends numbered frames and checks each echo from 'DEVLINK echo'.\n"
     "\n"
-    "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
+    "  --line LINE   serial device or tcp:HOST[:PORT] (default " DEFAULT_LINE
+    ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --count N     frames to send (default 20)\n"
     "  --size N      payload bytes per frame, up to 1024 (default 1024)\n";
@@ -69,7 +74,8 @@ static const char *const help_exec =
     "work. From a terminal it is not, since a command that ignores stdin\n"
     "would otherwise swallow what you type at your own shell.\n"
     "\n"
-    "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
+    "  --line LINE   serial device or tcp:HOST[:PORT] (default " DEFAULT_LINE
+    ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --cwd DIR     directory to run in, on the agent (default: its own)\n"
     "  --merge       send stderr down stdout, preserving their interleaving\n"
@@ -145,7 +151,8 @@ static const char *const help_linktest =
     "Streams data through 'DEVLINK linktest', which echoes it back, and\n"
     "checks every byte. Both directions run at once, compressed.\n"
     "\n"
-    "  --line PATH   serial device (default " DEFAULT_LINE ", or $DEVLINK_LINE)\n"
+    "  --line LINE   serial device or tcp:HOST[:PORT] (default " DEFAULT_LINE
+    ", or $DEVLINK_LINE)\n"
     "  --baud N      line speed (default 115200)\n"
     "  --bytes N     bytes to stream (default 200000)\n"
     "  --window N    frames in flight, 1-32 (default 16)\n"
@@ -307,6 +314,11 @@ static int cmd_echo(int argc, char **argv)
         return 1;
     if (line == NULL)
         line = DEFAULT_LINE;
+    if (strncmp(line, "tcp:", 4) == 0) {
+        fprintf(stderr, "devlink: %s tests the serial link itself; it has no meaning over TCP\n",
+                "echo");
+        return 1;
+    }
     if ((baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud)) ||
         (count_s && !parse_u32(count_s, "count", 65535U, &count)) ||
         (size_s && !parse_u32(size_s, "size", WL_SERIAL_MAX_PAYLOAD, &size)))
@@ -391,6 +403,11 @@ static int cmd_linktest(int argc, char **argv)
         return 1;
     if (line == NULL)
         line = DEFAULT_LINE;
+    if (strncmp(line, "tcp:", 4) == 0) {
+        fprintf(stderr, "devlink: %s tests the serial link itself; it has no meaning over TCP\n",
+                "linktest");
+        return 1;
+    }
     if ((baud_s && !parse_u32(baud_s, "baud rate", 4000000U, &baud)) ||
         (bytes_s && !parse_u32(bytes_s, "byte count", 100000000U, &bytes)) ||
         (window_s && !parse_u32(window_s, "window", WL_LINK_MAX_WINDOW, &window)))
@@ -454,6 +471,79 @@ static void exec_output(void *ctx, uint8_t stream, const uint8_t *p, size_t n)
     (void)ctx;
     (void)fwrite(p, 1, n, f);
     (void)fflush(f);
+}
+
+/*
+ * The key for TCP lines, loaded the first time one is opened: the derivation
+ * is deliberately slow, and a command opens its line once. $DEVLINK_KEY names
+ * the key file; otherwise it is ~/.config/devlink/key.
+ */
+static struct wl_session_cfg serial_session(uint32_t baud);
+
+static uint8_t tcp_key[WL_NOISE_KEYLEN];
+static struct wl_tcplink_cfg tcp_link;
+
+static wl_status load_tcp_key(void)
+{
+    const char *path = getenv("DEVLINK_KEY");
+    char def[PATH_MAX];
+    wl_status st;
+
+    if (path == NULL || path[0] == '\0') {
+        const char *home = getenv("HOME");
+
+        if (home == NULL ||
+            snprintf(def, sizeof(def), "%s/.config/devlink/key", home) >= (int)sizeof(def))
+            return wl_fail(WL_ERR_INVAL, "no $HOME, so no ~/.config/devlink/key; set DEVLINK_KEY");
+        path = def;
+    }
+    st = wl_key_load(path, tcp_key);
+    if (st == WL_ERR_INVAL)
+        return wl_fail(WL_ERR_INVAL,
+                       "a tcp: line needs the agent's passphrase: no key file at %s "
+                       "(put the passphrase on its first line, or point DEVLINK_KEY at one)",
+                       path);
+    return st;
+}
+
+static struct wl_session_cfg tcp_session(void)
+{
+    struct wl_session_cfg cfg;
+
+    wl_session_cfg_init(&cfg);
+    cfg.link.bytes_per_sec = 0;
+    cfg.level = WL_SESSION_TCP_LEVEL;
+    wl_tcplink_cfg_init(&tcp_link);
+    tcp_link.initiator = 1;
+    tcp_link.psk = tcp_key;
+    cfg.make_link = wl_tcplink_make;
+    cfg.make_link_arg = &tcp_link;
+    return cfg;
+}
+
+/*
+ * Opens a line itself, not through a multiplexer: a serial port, or a TCP
+ * connection when the line is "tcp:HOST[:PORT]" (tcp.h). A tcp: line that
+ * does not parse is an error here, never a serial path to try.
+ */
+static wl_status open_direct(const char *line, uint32_t baud, struct wl_session_cfg *cfg,
+                             struct wl_transport *t)
+{
+    char host[256];
+    uint16_t port;
+    wl_status st = wl_tcp_parse(line, host, sizeof(host), &port);
+
+    if (st == WL_ERR_INVAL) {
+        *cfg = serial_session(baud);
+        return wl_serial_open(line, baud, t);
+    }
+    if (st != WL_OK)
+        return st;
+    st = load_tcp_key();
+    if (st != WL_OK)
+        return st;
+    *cfg = tcp_session();
+    return wl_tcp_connect(host, port, 5000, t);
 }
 
 static struct wl_session_cfg serial_session(uint32_t baud)
@@ -577,10 +667,8 @@ static wl_status open_line(const char *line, uint32_t baud, struct wl_session_cf
         return wl_unix_connect(line + 5, t);
     }
     if (want == NULL || want[0] == '0' || want[0] == '\0' ||
-        !wl_mux_socket_path(line, sock, sizeof(sock))) {
-        *cfg = serial_session(baud);
-        return wl_serial_open(line, baud, t);
-    }
+        !wl_mux_socket_path(line, sock, sizeof(sock)))
+        return open_direct(line, baud, cfg, t);
     *cfg = local_session();
     if (wl_unix_connect(sock, t) == WL_OK)
         return WL_OK;
@@ -589,8 +677,7 @@ static wl_status open_line(const char *line, uint32_t baud, struct wl_session_cf
     /* Asked for but unavailable: opening the line directly gives the real
      * reason (the port is held, the device is missing) instead of a complaint
      * about a socket. */
-    *cfg = serial_session(baud);
-    return wl_serial_open(line, baud, t);
+    return open_direct(line, baud, cfg, t);
 }
 
 /*
@@ -1194,12 +1281,13 @@ static int cmd_mux(int argc, char **argv)
     (void)prctl(PR_SET_NAME, "devlink", 0, 0, 0);
 
     memset(&cfg, 0, sizeof(cfg));
-    cfg.session = serial_session(baud);
     cfg.socket_path = sock;
     cfg.idle_exit_ms = idle * 1000U;
     cfg.stop = mux_should_stop;
     cfg.log = mux_log;
-    if (wl_serial_open(line, baud, &t) != WL_OK) {
+    /* Over TCP the multiplexer holds one connection, and so one session;
+     * when that ends it exits, and the next command starts a new one. */
+    if (open_direct(line, baud, &cfg.session, &t) != WL_OK) {
         fprintf(stderr, "devlink: %s\n", wl_error());
         return 1;
     }

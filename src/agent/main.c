@@ -4,20 +4,23 @@
 #include <windows.h>
 
 #include "devlink/agent.h"
+#include "devlink/agent_tcp.h"
 #include "devlink/echo.h"
 #include "devlink/linktest.h"
 #include "devlink/proto.h"
 #include "devlink/transport.h"
 #include "devlink/version.h"
+#include "keypath.h"
 
 static const char *const help =
     "usage: DEVLINK --version\n"
-    "       DEVLINK serve [PORT] [BAUD]\n"
+    "       DEVLINK serve [PORT] [BAUD] [TCPPORT]\n"
     "       DEVLINK echo [PORT] [BAUD] [IDLE_SECONDS]\n"
     "       DEVLINK linktest [PORT] [BAUD] [WAIT_SECONDS]\n"
     "\n"
     "serve  the agent proper: serve devlink clients until stopped (Ctrl-C).\n"
-    "       Defaults: COM1 115200.\n"
+    "       Defaults: COM1 115200 2098. PORT none serves TCP alone. TCP is on\n"
+    "       only when DEVLINK.KEY beside this program holds a passphrase.\n"
     "echo   serve 'devlink echo' from Linux: echo every frame back.\n"
     "       Defaults: COM1 115200 60. Returns when the probe finishes or\n"
     "       after IDLE_SECONDS without a frame.\n"
@@ -59,11 +62,15 @@ static int cmd_serve(int argc, char **argv)
 {
     const char *port = argc > 0 ? argv[0] : "COM1";
     unsigned long baud = argc > 1 ? strtoul(argv[1], NULL, 10) : 115200UL;
+    unsigned long tcp_port = argc > 2 ? strtoul(argv[2], NULL, 10) : WL_TCP_DEFAULT_PORT;
+    int serial = strcmp(port, "none") != 0;
     struct wl_agent_cfg cfg;
+    struct wl_agent_tcp tcp;
     struct wl_transport t;
+    char key[MAX_PATH];
     wl_status s;
 
-    if (argc > 2 || baud == 0) {
+    if (argc > 3 || baud == 0 || tcp_port == 0 || tcp_port > 65535UL) {
         fputs(help, stderr);
         return 1;
     }
@@ -72,14 +79,35 @@ static int cmd_serve(int argc, char **argv)
     cfg.session.link.bytes_per_sec = (uint32_t)(baud / 10UL);
     cfg.platform = platform();
     cfg.log = console_log;
-    if (wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
-        fprintf(stderr, "DEVLINK: %s\n", wl_error());
+    if (!agent_key_path(key, sizeof(key)) ||
+        wl_agent_tcp_open(key, NULL, (uint16_t)tcp_port, &tcp) != WL_OK) {
+        fprintf(stderr, "DEVLINK: TCP: %s\n", wl_error());
         return 1;
     }
-    printf("devlink agent %s serving on %s at %lu\n", wl_version(), port, baud);
+    if (!serial && tcp.l == NULL) {
+        fprintf(stderr, "DEVLINK: nothing to serve: no serial port, and no %s\n", key);
+        return 1;
+    }
+    if (serial && wl_serial_open(port, (uint32_t)baud, &t) != WL_OK) {
+        fprintf(stderr, "DEVLINK: %s\n", wl_error());
+        wl_agent_tcp_close(&tcp);
+        return 1;
+    }
+    if (serial)
+        printf("devlink agent %s serving on %s at %lu\n", wl_version(), port, baud);
+    else
+        printf("devlink agent %s, no serial port\n", wl_version());
+    if (tcp.l != NULL)
+        printf("TCP: listening on port %u, encrypted with the passphrase in %s\n",
+               (unsigned)tcp.port, key);
+    else
+        printf("TCP: off (no %s)\n", key);
     fflush(stdout);
-    s = wl_agent_serve(&t, &cfg, (uint32_t)GetTickCount() ^ (uint32_t)GetCurrentProcessId());
-    wl_transport_close(&t);
+    s = wl_agent_run(serial ? &t : NULL, tcp.l != NULL ? &tcp.listener : NULL, &cfg,
+                     (uint32_t)GetTickCount() ^ (uint32_t)GetCurrentProcessId());
+    if (serial)
+        wl_transport_close(&t);
+    wl_agent_tcp_close(&tcp);
     if (s != WL_OK) {
         fprintf(stderr, "DEVLINK: %s\n", wl_error());
         return 1;

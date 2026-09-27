@@ -106,7 +106,10 @@ static int tcp_fd(void *impl)
  * arrives as ::ffff:a.b.c.d, and is written the way a person would type it. */
 static void format_addr(const struct sockaddr_storage *ss, char *out, size_t cap)
 {
-    char host[NI_MAXHOST];
+    /* Numeric only (NI_NUMERICHOST), so the longest is an IPv6 address, not
+     * NI_MAXHOST's hostname; sizing it so is what lets the compiler see the
+     * formatted result fits the callers' buffers. */
+    char host[INET6_ADDRSTRLEN];
     char serv[NI_MAXSERV];
     struct sockaddr_in v4;
     const struct sockaddr *sa = (const struct sockaddr *)ss;

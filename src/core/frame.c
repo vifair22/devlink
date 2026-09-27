@@ -56,7 +56,7 @@ void wl_frame_rx_init(struct wl_frame_rx *rx, size_t max_payload)
 static void rx_frame(struct wl_frame_rx *rx, wl_frame_cb cb, void *ctx)
 {
     struct wl_frame f;
-    size_t body_len;
+    size_t body_len = 0; /* set by a successful decode; GCC's LTO cannot see that */
     uint32_t want;
 
     if (wl_cobs_decode(rx->wire, rx->wire_len, rx->body, sizeof(rx->body),

@@ -25,6 +25,10 @@
 
 #define WL_SESSION_QUEUE 65536U /* plaintext buffered each way */
 #define WL_SESSION_DEFAULT_LEVEL 9 /* CPU is free next to a 11 KB/s line */
+/* Over TCP the line is no longer the bottleneck and the target's CPU is, so
+ * less effort buys more throughput. A first figure; docs/plan.md step 9g
+ * measures it on the target. */
+#define WL_SESSION_TCP_LEVEL 6
 
 /*
  * Builds the link a session runs over. The default, with make_link NULL, is

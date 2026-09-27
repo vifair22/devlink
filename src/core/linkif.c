@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include "devlink/clock.h"
 #include "devlink/linkif.h"
 
@@ -38,8 +40,21 @@ wl_status wl_linkif_pump(struct wl_linkif *l, struct wl_transport *t, uint32_t m
     if (wait > max_wait_ms)
         wait = max_wait_ms;
     s = wl_transport_read(t, buf, room, &got, wait);
-    if (s != WL_OK)
+    if (s != WL_OK) {
+        /* A link that never came up and never will (TCP) whose connection
+         * closes has almost always been refused by the agent's handshake,
+         * which says nothing on the wire by design. Say it here, where the
+         * client can see it. */
+        if (l->ops->rx_room != NULL && l->ops->generation(l->impl) == 0) {
+            char why[256]; /* the size of the error buffer it copies */
+
+            /* Copied first: wl_fail formats into the buffer wl_error reads. */
+            (void)snprintf(why, sizeof(why), "%s", wl_error());
+            return wl_fail(s, "%s before the handshake finished: the agent refused the "
+                              "passphrase, or it is not a devlink agent", why);
+        }
         return s;
+    }
     if (got > 0)
         l->ops->rx(l->impl, buf, got, wl_clock_ms());
     s = flush_tx(l, t, wire);
