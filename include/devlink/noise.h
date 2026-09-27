@@ -21,14 +21,15 @@
 #define WL_NOISE_TAGLEN 16
 /* Noise's own limit on a message, handshake or transport. */
 #define WL_NOISE_MAX_MSG 65535U
-#define WL_NOISE_PBKDF2_ITERATIONS 100000U
+#define WL_NOISE_PBKDF2_ITERATIONS 10000U
 
 /* The prologue both sides bind into the handshake, so a peer speaking
  * another protocol version cannot complete it. */
 #define WL_NOISE_PROLOGUE "devlink 1"
 
 /* PBKDF2-HMAC-SHA256(pass, "devlink psk v1", WL_NOISE_PBKDF2_ITERATIONS, 32).
- * Deliberately slow: about a second on the target, once at startup. */
+ * Deliberately slow: about a second on the target, once at startup
+ * (docs/protocol.md, "Passphrase and key", says how that was measured). */
 void wl_noise_psk_from_passphrase(const char *pass, size_t len,
                                   uint8_t psk[WL_NOISE_KEYLEN]);
 

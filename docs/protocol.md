@@ -3,8 +3,7 @@
 Status: agreed in iteration 1; the TCP link, its encryption and serving
 several sessions at once were redesigned in iteration 9 (2026-09-27), before
 any TCP code existed, so no deployed peer speaks the earlier draft.
-Implemented: all of it (iterations 2-9, 11-12). The TCP link's PBKDF2
-iteration count is still to be confirmed on the target (docs/plan.md, 9g).
+Implemented: all of it (iterations 2-9, 11-12).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
@@ -162,12 +161,19 @@ Both sides hold the same passphrase. Each derives a 32-byte key from it once,
 at startup:
 
 ```
-psk = PBKDF2-HMAC-SHA256(passphrase, salt = "devlink psk v1", iterations = 100000, 32 bytes)
+psk = PBKDF2-HMAC-SHA256(passphrase, salt = "devlink psk v1", iterations = 10000, 32 bytes)
 ```
 
 The iteration count is part of the protocol, since both sides must agree on
-it. 100000 is a first figure, chosen to cost about a second on a Pentium III;
-it is to be measured on the A21m and fixed before the first TCP release.
+it. 10000 costs about a second on the target, a 550 MHz Pentium III, in the
+Watcom build of the Windows agent, which is the slowest of the three
+programs that derive it. Measured (docs/plan.md, 9g) on an emulated Pentium
+III whose clock runs at 500 million instructions a second (QEMU `-icount
+shift=1`, a 550 MHz P6 at about 0.9 instructions per clock): 100000
+iterations took 4.8 s in the gcc build, and the Watcom build is 2.3 times
+slower than gcc on the same machine, so 10000 is about 1.1 s for the
+Windows agent and 0.5 s for the Linux one. The count only slows guessing
+the passphrase; it does not make a guessable one safe.
 
 Where the passphrase lives is a local matter, not wire format: the agent reads
 `DEVLINK.KEY` beside its program, the client `~/.config/devlink/key` or

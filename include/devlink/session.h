@@ -31,9 +31,9 @@
  * the one that suits its CPU. The client's is free next to the target's and
  * inflating costs the target about the same at any level, so the client
  * keeps a good ratio. The agent, on a Pentium III, compresses at level 1:
- * measured with tcpbench (docs/plan.md, 9g), level 1 runs about twice as
- * fast as level 6 for 4% more output on machine code, and even so the CPU,
- * not a 100 Mbit card, is what limits it. To be confirmed on the A21m.
+ * measured with tcpbench on an emulated one at the A21m's speed (docs/plan.md,
+ * 9g), level 1 runs at 2.3 MB/s against level 6's 1.0 for 55% of the input
+ * against 52%, and even so the CPU, not a 100 Mbit card, is what limits it.
  */
 #define WL_SESSION_TCP_LEVEL 6
 #define WL_SESSION_TCP_AGENT_LEVEL 1

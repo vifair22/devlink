@@ -15,7 +15,7 @@ is only needed once there is an agent feature to try.
 | 6 | Channels and `exec` with streamed output | done: `devlink exec` runs commands on the A21m |
 | 7 | `put` / `get` | done: files round-trip byte-exact; the agent updates itself |
 | 8 | `sync`: hash manifests, send only changed files | done: 50-file tree, no changes, syncs in 0.25 s |
-| 9 | TCP transport, encrypted, served beside serial | done on a Windows 2000 VM: 9a-9f, 9g and 9h as far as they go without the A21m; the A21m waits for its card (see "Where it stands") |
+| 9 | TCP transport, encrypted, served beside serial | done: 9a-9h, tested on a Windows 2000 VM of the A21m's disk and measured on an emulated Pentium III (see "Where it stands") |
 | 10 | Windows 2000 pass | full suite against a 2000 agent, and the NT-only improvements below |
 | 11 | Local multiplexer | several commands at once from separate terminals, over one session |
 | 12 | A window instead of a console | the agent runs as a real Win32 window on the A21m, showing what it is doing now |
@@ -64,8 +64,9 @@ loop already woke every 20 ms, so this costs nothing it did not.
 
 ### Where it stands (2026-09-27)
 
-Steps 9a to 9f are done and committed, and 9g and 9h are as far as they can
-go without the A21m, which was out of reach and still has no network card.
+Steps 9a to 9h are done. The A21m was out of reach and has no network card
+yet, so testing ran on VMs: its own disk as a Windows 2000 machine, and a
+Pentium III emulated at its speed for the measurements.
 
 - **9a-9f**: as the table says. The whole EXEC suite runs twice, over serial
   and over TCP (`test_exec_tcp`), and the agent serving serial and several
@@ -80,15 +81,25 @@ go without the A21m, which was out of reach and still has no network card.
   `@time`, two TCP commands at once, the wrong passphrase refused with the
   explanation, and the agent updating itself over TCP. The serial session
   finished undisturbed throughout. On the A21m itself it waits for the card.
-- **9g, measured where possible**: `tools/tcpbench.c` (make tcpbench) times
-  the two numbers. In the VM (KVM, so the host's speed, not a Pentium III):
-  the key derivation at 100000 iterations takes 291 ms in the Watcom build;
-  deflate runs level 1 about twice as fast as level 6 for 4% more output on
-  machine code. The ratio between levels does not depend on the CPU, so the
-  agent compresses at level 1 over TCP and the client at 6 (the level is each
-  side's own choice). The iteration count stays at 100000 until TCPBENCH.EXE
-  has run on the A21m: estimated from the host at two to four seconds, over
-  the protocol's "about a second", so it will probably come down.
+- **9g, measured on a VM at the target's speed**: `tools/tcpbench.c` (make
+  tcpbench) times the two numbers. A KVM guest runs at the host's speed, so
+  the measurement that counts was taken on an emulated Pentium III instead:
+  QEMU without KVM and with `-icount shift=1`, which executes 500 million
+  instructions per second of guest time, a 550 MHz P6 (the A21m's SpeedStep
+  part runs at 550) at about 0.9 instructions per clock. Guest timers follow
+  the instruction count, so what tcpbench measures inside is that machine's
+  time. It ran on the devlink-rescue image, i586 gcc build:
+  - **Key derivation**: 100000 iterations took 5.7 s, 4.8 s after making
+    SHA-256's rotate a macro and its padding one step (Watcom did not
+    inline the rotate function). The Windows agent is built with Watcom,
+    2.3 times slower than gcc on the same machine (measured under Wine), so
+    about 11 s. The protocol's count is therefore 10000: about 1.1 s for
+    the Windows agent, 0.5 s for the Linux one. Final.
+  - **Deflate**, one stream over a binary: level 1 at 2.3 MB/s for 55%,
+    level 6 at 1.0 MB/s for 52%, level 9 at 0.4 MB/s. A Pentium III is
+    CPU-bound long before a 100 Mbit card fills, so the agent compresses at
+    level 1 over TCP; the client, whose CPU is free, at 6 (the level is each
+    side's own choice). Final.
 
 **Throughput, found in 9h.** The first uploads to the VM ran at 279 KB/s,
 and 4 MB/s even between two Linux processes. Three things, none of them the
@@ -111,10 +122,10 @@ at 25 MB/s (from 4 and 7); to the Windows 2000 VM, put at 5.7 MB/s (from
 0.28) and get at 2.5 MB/s, which is about one credit window per Windows timer
 tick and is left for the real card to confirm or not.
 
-**Still to do on the A21m**, once the card is fitted: run TCPBENCH.EXE and
-fix the PBKDF2 count and the agent's level from its figures (then the
-protocol's number is final); the full suite over TCP beside serial there;
-measure throughput over the real card.
+**Worth doing on the A21m** once the card is fitted, as a check rather than
+a step: TCPBENCH.EXE there should agree with the emulated figures above; the
+suite over TCP beside serial on the real machine; throughput over the real
+card.
 
 ## Iteration 11: running more than one command at a time
 

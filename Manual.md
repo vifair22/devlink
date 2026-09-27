@@ -788,8 +788,9 @@ yet measured on the A21m, which has no network card yet; so far (2026-09-27):
 | `get`, the same | 2.5 MB/s |
 
 On a Pentium III, compressing is the bottleneck well before a 100 Mbit card
-is, which is why the agent compresses at level 1 over TCP and the client at
-6 (docs/plan.md, 9g, and `make tcpbench` to measure it on a machine).
+is: at the A21m's speed deflate runs at 2.3 MB/s at level 1 and 1.0 MB/s at
+level 6, which is why the agent compresses at level 1 over TCP and the client
+at 6 (docs/plan.md, 9g, and `make tcpbench` to measure it on a machine).
 
 ## 9. Diagnosing a link
 

@@ -3,8 +3,10 @@
 
 #include "devlink/sha256.h"
 
-/* FIPS 180-4. Straightforward implementation: the link moves 11 KB/s, so
- * hashing is never the bottleneck. */
+/* FIPS 180-4. Straightforward, apart from one thing: the TCP link's key is
+ * 2 x 100k-ish compressions of PBKDF2 at startup on a Pentium III, so the
+ * compression function is written for the compiler that builds the agent.
+ * Watcom does not turn a rotate function into a rotate, so it is a macro. */
 
 static const uint32_t K[64] = {
     0x428A2F98U, 0x71374491U, 0xB5C0FBCFU, 0xE9B5DBA5U, 0x3956C25BU, 0x59F111F1U,
@@ -19,10 +21,7 @@ static const uint32_t K[64] = {
     0x5B9CCA4FU, 0x682E6FF3U, 0x748F82EEU, 0x78A5636FU, 0x84C87814U, 0x8CC70208U,
     0x90BEFFFAU, 0xA4506CEBU, 0xBEF9A3F7U, 0xC67178F2U};
 
-static uint32_t ror(uint32_t x, unsigned n)
-{
-    return (x >> n) | (x << (32U - n));
-}
+#define ROR(x, n) (((x) >> (n)) | ((x) << (32U - (n))))
 
 static void compress(uint32_t state[8], const uint8_t block[64])
 {
@@ -43,17 +42,17 @@ static void compress(uint32_t state[8], const uint8_t block[64])
                ((uint32_t)src[2] << 8) | (uint32_t)src[3];
     }
     for (unsigned i = 16; i < 64; i++) {
-        uint32_t s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        uint32_t s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        uint32_t s0 = ROR(w[i - 15], 7) ^ ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = ROR(w[i - 2], 17) ^ ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
 
         w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
     for (unsigned i = 0; i < 64; i++) {
-        uint32_t s1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25);
+        uint32_t s1 = ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25);
         uint32_t ch = (e & f) ^ (~e & g);
         uint32_t t1 = h + s1 + ch + K[i] + w[i];
-        uint32_t s0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22);
-        uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        uint32_t s0 = ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22);
+        uint32_t maj = (a & b) | (c & (a | b));
         uint32_t t2 = s0 + maj;
 
         h = g;
@@ -108,13 +107,17 @@ void wl_sha256_update(struct wl_sha256 *s, const void *data, size_t n)
 void wl_sha256_final(struct wl_sha256 *s, uint8_t out[32])
 {
     uint64_t bits = s->bits;
-    uint8_t pad = 0x80U;
     uint8_t len[8];
 
-    wl_sha256_update(s, &pad, 1);
-    pad = 0;
-    while (s->used != 56U)
-        wl_sha256_update(s, &pad, 1);
+    /* The padding is written in place rather than a byte at a time through
+     * update(): PBKDF2 finishes two hashes per iteration. */
+    s->block[s->used++] = 0x80U;
+    if (s->used > 56U) {
+        memset(s->block + s->used, 0, 64U - s->used);
+        compress(s->state, s->block);
+        s->used = 0;
+    }
+    memset(s->block + s->used, 0, 56U - s->used);
     for (size_t i = 0; i < 8; i++)
         len[i] = (uint8_t)(bits >> (56U - (i * 8U)));
     /* The length is appended outside the bit counter, so it is written

@@ -178,7 +178,7 @@ static void test_psk_from_passphrase(void **state)
     (void)clock_gettime(CLOCK_MONOTONIC, &t0);
     wl_noise_psk_from_passphrase(pass, sizeof(pass) - 1U, psk);
     (void)clock_gettime(CLOCK_MONOTONIC, &t1);
-    assert_hex(psk, 32, "85b1f6b4c8b5f99a4e0b8ea9ba279590a879393a79fbc0a0367aec787770cd47");
+    assert_hex(psk, 32, "f1947c0c07d18e993a2d17f9a08c20a70ac11933e4520c45ffef16fd83b8f88e");
     printf("psk from passphrase: %u iterations in %.0f ms\n",
            (unsigned)WL_NOISE_PBKDF2_ITERATIONS,
            ((double)(t1.tv_sec - t0.tv_sec) * 1000.0) +
