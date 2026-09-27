@@ -708,3 +708,71 @@ void wl_link_get_stats(const struct wl_link *l, struct wl_link_stats *out)
     out->rto_ms = l->rto;
     out->rx = l->frx.stats;
 }
+
+/* ---------------------------------------------------------------------------
+ * The serial link behind the session's link interface (linkif.h)
+ * ------------------------------------------------------------------------- */
+
+static void if_rx(void *impl, const uint8_t *data, size_t n, uint32_t now)
+{
+    wl_link_rx(impl, data, n, now);
+}
+
+static size_t if_poll_tx(void *impl, uint8_t *out, size_t cap, uint32_t now)
+{
+    return wl_link_poll_tx(impl, out, cap, now);
+}
+
+static uint32_t if_next_timeout(const void *impl, uint32_t now)
+{
+    return wl_link_next_timeout(impl, now);
+}
+
+static size_t if_send(void *impl, const uint8_t *data, size_t n)
+{
+    return wl_link_send(impl, data, n);
+}
+
+static size_t if_recv(void *impl, uint8_t *buf, size_t cap)
+{
+    return wl_link_recv(impl, buf, cap);
+}
+
+static size_t if_unacked(const void *impl)
+{
+    return wl_link_unacked(impl);
+}
+
+static int if_is_up(const void *impl)
+{
+    return wl_link_is_up(impl);
+}
+
+static uint32_t if_generation(const void *impl)
+{
+    return wl_link_generation(impl);
+}
+
+/* A serial line never fails for good: whatever happens, the next SYNC from
+ * the peer brings a new session up on it. */
+static wl_status if_failed(const void *impl)
+{
+    (void)impl;
+    return WL_OK;
+}
+
+static void if_free(void *impl)
+{
+    wl_link_free(impl);
+}
+
+static const struct wl_link_ops serial_ops = {
+    if_rx,     if_poll_tx, if_next_timeout, if_send,   if_recv,
+    if_unacked, if_is_up,  if_generation,   if_failed, if_free,
+};
+
+void wl_link_as_if(struct wl_link *l, struct wl_linkif *out)
+{
+    out->ops = &serial_ops;
+    out->impl = l;
+}

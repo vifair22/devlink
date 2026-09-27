@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "devlink/frame.h"
+#include "devlink/linkif.h"
 #include "devlink/status.h"
 
 /*
@@ -17,7 +18,7 @@
  * deterministic, which is what lets the tests drive it through a simulated
  * line with loss, corruption and delay in virtual time.
  *
- * Typical loop (see link_io.h for the one both programs use):
+ * Typical loop (see linkif.h for the one both programs use):
  *
  *     wl_link_rx(l, bytes_from_port, n, now);
  *     while ((n = wl_link_poll_tx(l, buf, sizeof(buf), now)) > 0)
@@ -103,5 +104,9 @@ int wl_link_is_up(const struct wl_link *l);
 uint32_t wl_link_generation(const struct wl_link *l);
 
 void wl_link_get_stats(const struct wl_link *l, struct wl_link_stats *out);
+
+/* The link as the session sees it (linkif.h). The link stays owned by
+ * whoever holds the interface: its free op frees the link. */
+void wl_link_as_if(struct wl_link *l, struct wl_linkif *out);
 
 #endif

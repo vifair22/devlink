@@ -3,7 +3,6 @@
 
 #include <zlib.h>
 
-#include "devlink/link_io.h"
 #include "devlink/session.h"
 
 /* Compressed bytes between deflate and the link, and between the link and
@@ -20,7 +19,8 @@ struct lbuf {
 };
 
 struct wl_session {
-    struct wl_link *link;
+    struct wl_linkif link;
+    struct wl_link *serial; /* the same link, when it is the serial one */
     uint32_t gen; /* link generation the streams belong to */
     int level;
     int streams_ready;
@@ -123,7 +123,7 @@ static void work_tx(struct wl_session *s)
 {
     for (;;) {
         if (s->out_z_b.len > 0) {
-            size_t n = wl_link_send(s->link, s->out_z + s->out_z_b.head, s->out_z_b.len);
+            size_t n = s->link.ops->send(s->link.impl, s->out_z + s->out_z_b.head, s->out_z_b.len);
 
             s->stats.z_out += n;
             consume(&s->out_z_b, n);
@@ -155,7 +155,7 @@ static wl_status work_rx(struct wl_session *s)
 
         if (s->in_z_b.len == 0) {
             s->in_z_b.head = 0;
-            s->in_z_b.len = wl_link_recv(s->link, s->in_z, ZBUF);
+            s->in_z_b.len = s->link.ops->recv(s->link.impl, s->in_z, ZBUF);
             s->stats.z_in += s->in_z_b.len;
             if (s->in_z_b.len == 0)
                 return WL_OK;
@@ -187,7 +187,7 @@ static wl_status work_rx(struct wl_session *s)
 
 wl_status wl_session_work(struct wl_session *s)
 {
-    uint32_t gen = wl_link_generation(s->link);
+    uint32_t gen = s->link.ops->generation(s->link.impl);
 
     if (gen != s->gen) {
         wl_status st = reset_streams(s);
@@ -196,7 +196,7 @@ wl_status wl_session_work(struct wl_session *s)
             return st;
         s->gen = gen;
     }
-    if (!wl_link_is_up(s->link) || !s->streams_ready)
+    if (!s->link.ops->is_up(s->link.impl) || !s->streams_ready)
         return WL_OK;
     work_tx(s);
     return work_rx(s);
@@ -209,7 +209,7 @@ wl_status wl_session_pump(struct wl_session *s, struct wl_transport *t,
 
     if (st != WL_OK)
         return st;
-    st = wl_link_pump(s->link, t, max_wait_ms);
+    st = wl_linkif_pump(&s->link, t, max_wait_ms);
     if (st != WL_OK)
         return st;
     return wl_session_work(s);
@@ -232,11 +232,19 @@ struct wl_session *wl_session_new(const struct wl_session_cfg *cfg, uint32_t see
         return NULL;
     }
     s->level = cfg->level >= 0 && cfg->level <= 9 ? cfg->level : WL_SESSION_DEFAULT_LEVEL;
-    s->link = wl_link_new(&cfg->link, seed, now);
-    if (s->link == NULL) {
+    if (cfg->make_link != NULL) {
+        if (cfg->make_link(cfg->make_link_arg, seed, now, &s->link) != WL_OK) {
+            free(s);
+            return NULL;
+        }
+        return s;
+    }
+    s->serial = wl_link_new(&cfg->link, seed, now);
+    if (s->serial == NULL) {
         free(s);
         return NULL;
     }
+    wl_link_as_if(s->serial, &s->link);
     return s;
 }
 
@@ -248,13 +256,18 @@ void wl_session_free(struct wl_session *s)
         (void)deflateEnd(&s->def);
         (void)inflateEnd(&s->inf);
     }
-    wl_link_free(s->link);
+    s->link.ops->free(s->link.impl);
     free(s);
 }
 
 struct wl_link *wl_session_link(struct wl_session *s)
 {
-    return s->link;
+    return s->serial;
+}
+
+struct wl_linkif *wl_session_linkif(struct wl_session *s)
+{
+    return &s->link;
 }
 
 size_t wl_session_send(struct wl_session *s, const uint8_t *data, size_t n)
@@ -263,7 +276,7 @@ size_t wl_session_send(struct wl_session *s, const uint8_t *data, size_t n)
 
     /* Refused until the streams belong to the current session, so bytes
      * never straddle two sessions' compressors. */
-    if (!wl_link_is_up(s->link) || s->gen != wl_link_generation(s->link))
+    if (!s->link.ops->is_up(s->link.impl) || s->gen != s->link.ops->generation(s->link.impl))
         return 0;
     compact(s->out_plain, &s->out_plain_b);
     room = tail_room(&s->out_plain_b, WL_SESSION_QUEUE);
@@ -286,12 +299,12 @@ size_t wl_session_recv(struct wl_session *s, uint8_t *buf, size_t cap)
 int wl_session_busy(const struct wl_session *s)
 {
     return s->out_plain_b.len > 0 || s->out_z_b.len > 0 || s->dirty ||
-           wl_link_unacked(s->link) > 0;
+           s->link.ops->unacked(s->link.impl) > 0;
 }
 
 int wl_session_is_up(const struct wl_session *s)
 {
-    return wl_link_is_up(s->link) && s->gen == wl_link_generation(s->link);
+    return s->link.ops->is_up(s->link.impl) && s->gen == s->link.ops->generation(s->link.impl);
 }
 
 uint32_t wl_session_generation(const struct wl_session *s)

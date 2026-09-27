@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "devlink/link.h"
+#include "devlink/linkif.h"
 #include "devlink/transport.h"
 
 /*
@@ -25,9 +26,20 @@
 #define WL_SESSION_QUEUE 65536U /* plaintext buffered each way */
 #define WL_SESSION_DEFAULT_LEVEL 9 /* CPU is free next to a 11 KB/s line */
 
+/*
+ * Builds the link a session runs over. The default, with make_link NULL, is
+ * the serial link, configured by `link`. Anything else (the TCP link) is
+ * built by make_link, called once from wl_session_new with make_link_arg and
+ * the session's seed and clock; on success the session owns what it built.
+ */
+typedef wl_status (*wl_make_link_fn)(void *arg, uint32_t seed, uint32_t now,
+                                     struct wl_linkif *out);
+
 struct wl_session_cfg {
     struct wl_link_cfg link;
     int level; /* zlib level 0-9; the peer needs no knowledge of it */
+    wl_make_link_fn make_link;
+    void *make_link_arg;
 };
 
 /* As wl_link_cfg_init, for the whole session configuration. */
@@ -47,16 +59,20 @@ struct wl_session *wl_session_new(const struct wl_session_cfg *cfg, uint32_t see
                                   uint32_t now);
 void wl_session_free(struct wl_session *s);
 
-/* The link underneath, for feeding received bytes and draining frames when
- * the caller drives I/O itself (the tests' simulated line does). */
+/* The serial link underneath, for feeding received bytes and draining frames
+ * when the caller drives I/O itself (the tests' simulated line does), and for
+ * its statistics. NULL when the session runs over another kind of link. */
 struct wl_link *wl_session_link(struct wl_session *s);
+
+/* The link underneath, whatever kind it is. */
+struct wl_linkif *wl_session_linkif(struct wl_session *s);
 
 /* Moves plaintext -> deflate -> link and link -> inflate -> plaintext as far
  * as buffers allow. Fails only if the peer's stream does not decompress,
  * which on a reliable link means a protocol mismatch or a bug. */
 wl_status wl_session_work(struct wl_session *s);
 
-/* work, then one wl_link_pump, then work again. */
+/* work, then one wl_linkif_pump, then work again. */
 wl_status wl_session_pump(struct wl_session *s, struct wl_transport *t,
                           uint32_t max_wait_ms);
 

@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "devlink/link_io.h"
 #include "devlink/peer.h"
 #include "devlink/proto.h"
 #include "devlink/version.h"
@@ -548,7 +547,7 @@ wl_status wl_peer_pump(struct wl_peer *p, struct wl_transport *t, uint32_t max_w
     /* The link is pumped even when the streams above it have failed: a
      * broken session is only cleared by the link seeing the peer's next
      * SYNC, and that needs the link to keep running. */
-    io = wl_link_pump(wl_session_link(p->s), t, max_wait_ms);
+    io = wl_linkif_pump(wl_session_linkif(p->s), t, max_wait_ms);
     if (io != WL_OK)
         return io;
     after = wl_peer_work(p);
