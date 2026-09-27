@@ -308,6 +308,26 @@ $(WINTCP_NATIVE): tools/wintcp_check.c $(WINTCP_CORE) $(SRC_DIR)/posix/tcp.c $(S
 	@mkdir -p $(WINTCP_DIR)
 	$(CC) $(CPPFLAGS_COMMON) -DVARIANT=wintcp $(CFLAGS_COMMON) -O2 -o $@ $^
 
+# The measurements behind docs/plan.md step 9g: key derivation and deflate
+# speed on the machine it runs on. A tool, in no gate; run TCPBENCH.EXE on the
+# target (put it there with devlink put) and tcpbench here to compare.
+.PHONY: tcpbench
+BENCH_DIR  := $(BUILD_DIR)/tcpbench
+BENCH_CORE := $(addprefix $(SRC_DIR)/core/,kdf.c noise.c sha256.c status.c)
+tcpbench: $(BENCH_DIR)/TCPBENCH.EXE $(BENCH_DIR)/tcpbench
+
+$(BENCH_DIR)/TCPBENCH.EXE: tools/tcpbench.c $(BENCH_CORE) $(SRC_DIR)/win32/clock.c \
+                           $(SRC_DIR)/win32/random.c $(WAT_VENDOR_OBJS)
+	@mkdir -p $(BENCH_DIR)/obj
+	$(WAT_ENV) wcl386 $(WAT_FLAGS) -l=nt -I$(ZLIB_DIR) -I$(MONO_DIR) -fo=$(BENCH_DIR)/obj/ \
+	    -fe=$@ $^
+
+$(BENCH_DIR)/tcpbench: tools/tcpbench.c $(BENCH_CORE) $(SRC_DIR)/posix/clock.c \
+                       $(SRC_DIR)/posix/random.c $(VENDOR_LIBS)
+	@mkdir -p $(BENCH_DIR)
+	$(CC) $(CPPFLAGS_COMMON) $(CFLAGS_COMMON) -O2 -o $@ \
+	    $(filter %.c,$^) $(VENDOR_LIBS)
+
 # ---------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------
