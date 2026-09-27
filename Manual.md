@@ -710,13 +710,19 @@ feature and was turned down when it was considered.
 the `exec` feels slow. Round-robin makes that fair rather than starved; there is
 no per-channel priority, which is a later question if it turns out to matter.
 
-**Limits.** Eight connected clients and twelve relayed channels at once. In
-normal use a command is one client holding one channel, so the client limit is
-the one you would meet first. The channel limit is slightly below what the
-agent itself can hold, which is eight commands, four transfers and a sync, or
-thirteen; reaching that through the multiplexer would need more channels than
-it has clients, so it is a corner rather than a ceiling you would find by
-working.
+**Limits.** The agent runs eight commands at once, across every session, and
+the multiplexer holds any command beyond that until one of the eight finishes,
+then starts it, oldest first. So a dozen commands started together all run:
+eight at once and the rest as the first ones end, each client simply waiting a
+little longer for its output. A command held this way has no time limit, as
+it would have none in a terminal of its own. The multiplexer takes 32 clients
+and 40 relayed channels; a client beyond 32 waits in the socket's backlog until
+one leaves, rather than being turned away. (Before 2026-09-27 the limit was
+eight clients, and a ninth saw "Connection reset by peer".)
+
+The agent's eight slots are shared with its other sessions, such as a TCP
+client, which the multiplexer cannot see. A command that loses that race is
+refused by the agent with "too many commands running".
 
 **When the port is busy.** Only one thing can hold the line. Anything else
 trying to open it is refused with the holder named:

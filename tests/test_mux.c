@@ -308,6 +308,49 @@ static void test_two_clients_run_at_once_without_disturbing_each_other(void **st
     assert_true(quick.done_ms < slow.done_ms);
 }
 
+/*
+ * More commands at once than the agent has slots for, as a survey that runs a
+ * dozen checks side by side does. The multiplexer used to accept eight
+ * clients and reset the rest, which they reported as "Connection reset by
+ * peer"; the agent itself refuses a ninth command. Every one of them runs
+ * now: those beyond the slots wait in the multiplexer and start as the first
+ * finish, so the run takes two waves, not one.
+ */
+static void test_more_commands_than_slots_all_run_in_turn(void **state)
+{
+    enum { JOBS = WL_AGENT_MAX_EXEC + 4 };
+    static struct job jobs[JOBS];
+    static char cmds[JOBS][48];
+    uint32_t start;
+    uint32_t last = 0;
+
+    (void)state;
+    wait_for_the_line();
+    memset(jobs, 0, sizeof(jobs));
+    start = wl_clock_ms();
+    for (unsigned i = 0; i < JOBS; i++) {
+        (void)snprintf(cmds[i], sizeof(cmds[i]), "sleep 0.4; echo J%u", i);
+        jobs[i].cmd = cmds[i];
+        assert_int_equal(pthread_create(&jobs[i].th, NULL, run_job, &jobs[i]), 0);
+    }
+    for (unsigned i = 0; i < JOBS; i++)
+        join_within(&jobs[i], 10000);
+    for (unsigned i = 0; i < JOBS; i++) {
+        char want[16];
+        int n = snprintf(want, sizeof(want), "J%u\n", i);
+
+        assert_int_equal(jobs[i].st, WL_OK);
+        assert_true(jobs[i].r.ran);
+        assert_int_equal(jobs[i].r.exit_code, 0);
+        assert_int_equal(jobs[i].cap.len, (size_t)n);
+        assert_memory_equal(jobs[i].cap.out, want, (size_t)n);
+        if (jobs[i].done_ms - start > last)
+            last = jobs[i].done_ms - start;
+    }
+    /* Queued, not all at once: the last wave started after the first ended. */
+    assert_true(last >= 750U);
+}
+
 /* A client that leaves takes its own command with it and nothing else. */
 static void test_one_client_leaving_does_not_disturb_the_other(void **state)
 {
@@ -652,6 +695,8 @@ int main(void)
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_two_clients_run_at_once_without_disturbing_each_other,
                                         setup, teardown),
+        cmocka_unit_test_setup_teardown(test_more_commands_than_slots_all_run_in_turn, setup,
+                                        teardown),
         cmocka_unit_test_setup_teardown(test_one_client_leaving_does_not_disturb_the_other,
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_a_client_arriving_before_the_line_is_up_is_served,

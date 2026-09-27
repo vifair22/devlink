@@ -5,14 +5,21 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "devlink/agent.h"
 #include "devlink/clock.h"
 #include "devlink/mux.h"
 #include "devlink/proto.h"
 #include "devlink/usock.h"
 #include "devlink/wire.h"
 
-#define MUX_CLIENTS 8U
-#define MUX_PAIRS 12U
+/*
+ * Clients are cheap here and commands are not: the agent runs
+ * WL_AGENT_MAX_EXEC at once, and the mux queues the rest (see holds_slot).
+ * The client limit only has to be comfortably above that, so that a burst of
+ * commands waits for a slot instead of being turned away at the socket.
+ */
+#define MUX_CLIENTS 32U
+#define MUX_PAIRS 40U
 #define LOOP_MS 20U
 
 /*
@@ -63,6 +70,10 @@ struct pair {
      * resynchronising at that moment.
      */
     int waiting;
+    /* Held for a command slot on the agent rather than for the line, and
+     * when it was queued, so slots go to the waiting in arrival order. */
+    int for_slot;
+    unsigned queued;
     int is_stop;     /* an @stop: once the agent accepts it, it is leaving */
     int up_closed;   /* the agent closed its end */
     int down_closed; /* the client closed its end */
@@ -109,6 +120,7 @@ struct mux {
     struct pair pairs[MUX_PAIRS];
     uint32_t seed;
     unsigned next_serial;
+    unsigned next_queued;
     uint32_t alone_since; /* when the last client left, for the idle timer */
 };
 
@@ -467,6 +479,41 @@ static int is_stop(uint8_t kind, const uint8_t *args, size_t n)
     return !r.bad && len == 5 && memcmp(cmd, "@stop", 5) == 0;
 }
 
+/*
+ * Whether a pair is using one of the agent's command slots. Every EXEC takes
+ * one, the @ commands included, from the moment it is sent until the agent
+ * closes the channel: the agent frees the slot in the same step as it sends
+ * that close, so once the close has arrived the slot is free for the next.
+ */
+static int holds_slot(const struct pair *p)
+{
+    return p->used && p->kind == WL_KIND_EXEC && !p->waiting && !p->up_closed &&
+           (p->pending || p->up_open);
+}
+
+static unsigned slots_in_use(const struct mux *m)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < MUX_PAIRS; i++)
+        n += holds_slot(&m->pairs[i]) ? 1U : 0U;
+    return n;
+}
+
+/*
+ * Commands beyond the agent's slots are queued here instead of sent on, where
+ * the agent would refuse them with "too many commands running". A burst of
+ * commands from several terminals is a normal way to use the mux, and every
+ * one of them should run, the later ones as the earlier finish. Slots are
+ * shared with the agent's other sessions (TCP clients), which this cannot
+ * see; a command that loses that race is refused by the agent with that
+ * message, as before.
+ */
+static int must_wait_for_slot(const struct mux *m, uint8_t kind)
+{
+    return kind == WL_KIND_EXEC && slots_in_use(m) >= WL_AGENT_MAX_EXEC;
+}
+
 static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args, size_t n)
 {
     struct client *c = ctx;
@@ -487,7 +534,8 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
     p->client_serial = c->serial;
     p->local = ch;
     p->is_stop = is_stop(kind, args, n);
-    if (!m->up_ready) {
+    p->kind = kind;
+    if (!m->up_ready || must_wait_for_slot(m, kind)) {
         p->args = malloc(n > 0 ? n : 1);
         if (p->args == NULL) {
             (void)wl_peer_reject(c->peer, ch, WL_E_PROCESS, "agent out of memory");
@@ -496,8 +544,9 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
         }
         memcpy(p->args, args, n);
         p->args_len = n;
-        p->kind = kind;
         p->waiting = 1;
+        p->for_slot = m->up_ready;
+        p->queued = ++m->next_queued;
         p->waiting_since = wl_clock_ms();
         return;
     }
@@ -509,32 +558,64 @@ static void down_open(void *ctx, uint16_t ch, uint8_t kind, const uint8_t *args,
     p->pending = 1;
 }
 
-/* Opens what was held while the line was down, and gives up on anything that
- * has waited too long. */
-static void open_the_waiting(struct mux *m)
+/* The held open that has waited longest, or NULL. */
+static struct pair *oldest_waiting(struct mux *m, unsigned after)
 {
+    struct pair *best = NULL;
+
     for (unsigned i = 0; i < MUX_PAIRS; i++) {
         struct pair *p = &m->pairs[i];
 
-        if (!p->used || !p->waiting)
-            continue;
+        if (p->used && p->waiting && p->queued > after &&
+            (best == NULL || p->queued < best->queued))
+            best = p;
+    }
+    return best;
+}
+
+/*
+ * Opens what was held, oldest first: opens held while the line was down, and
+ * commands held for a slot on the agent. Gives up on anything that has waited
+ * too long for the line. Waiting for a slot has no limit: it ends when a
+ * command ahead of it finishes, however long that takes, as it would in a
+ * terminal of its own.
+ */
+static void open_the_waiting(struct mux *m)
+{
+    unsigned after = 0;
+    struct pair *p;
+
+    while ((p = oldest_waiting(m, after)) != NULL) {
+        after = p->queued;
         if (pair_client(m, p) == NULL) {
             pair_free(p);
             continue;
         }
-        if (m->up_ready) {
-            if (wl_peer_open(m->up, p->kind, p->args, p->args_len, &p->up) != WL_OK)
-                continue; /* the mux is full for the moment; try again */
-            p->waiting = 0;
-            p->pending = 1;
-            free(p->args);
-            p->args = NULL;
-            p->args_len = 0;
-        } else if (wl_clock_since(p->waiting_since) >= WAIT_FOR_LINE_MS) {
-            (void)wl_peer_reject(m->clients[p->client].peer, p->local, WL_E_UNKNOWN,
-                                 "the line did not come up");
-            pair_free(p);
+        if (!m->up_ready) {
+            if (!p->for_slot && wl_clock_since(p->waiting_since) >= WAIT_FOR_LINE_MS) {
+                (void)wl_peer_reject(m->clients[p->client].peer, p->local, WL_E_UNKNOWN,
+                                     "the line did not come up");
+                pair_free(p);
+            } else if (p->for_slot) {
+                /* The line went down under a queued command: from here it is
+                 * waiting for the line, and gets that timeout from now. */
+                p->for_slot = 0;
+                p->waiting_since = wl_clock_ms();
+            }
+            continue;
         }
+        /* Oldest first, so a slot that frees goes to the command that has
+         * waited longest; opens of other kinds are not held back by it. */
+        if (must_wait_for_slot(m, p->kind))
+            continue;
+        if (wl_peer_open(m->up, p->kind, p->args, p->args_len, &p->up) != WL_OK)
+            continue; /* the mux is full for the moment; try again */
+        p->waiting = 0;
+        p->for_slot = 0;
+        p->pending = 1;
+        free(p->args);
+        p->args = NULL;
+        p->args_len = 0;
     }
 }
 
@@ -633,6 +714,15 @@ static void drop_client(struct mux *m, unsigned index)
     log_line(m, "client gone", "");
 }
 
+static unsigned count_clients(const struct mux *m)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < MUX_CLIENTS; i++)
+        n += m->clients[i].used ? 1U : 0U;
+    return n;
+}
+
 static void accept_client(struct mux *m, int listen_fd)
 {
     struct wl_transport t;
@@ -649,6 +739,8 @@ static void accept_client(struct mux *m, int listen_fd)
             c = &m->clients[i];
     }
     if (c == NULL) {
+        /* The loop does not accept while full, so this is only reachable if
+         * that changes; closing is still better than a slot overwritten. */
         log_line(m, "refused a client: too many already", "");
         wl_transport_close(&t);
         return;
@@ -819,7 +911,10 @@ wl_status wl_mux_serve(struct wl_transport *line, const struct wl_mux_cfg *cfg, 
             break;
         (void)flush_stashes(m, &block_up, block_down);
 
-        fds[nfds].fd = listen_fd;
+        /* With every client slot taken, a new connection stays in the listen
+         * backlog until one frees, and the socket is not polled meanwhile,
+         * since it would report readable on every pass. */
+        fds[nfds].fd = count_clients(m) < MUX_CLIENTS ? listen_fd : -1;
         fds[nfds].events = POLLIN;
         fds[nfds++].revents = 0;
         if (line_fd >= 0) {
