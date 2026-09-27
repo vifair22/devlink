@@ -48,10 +48,10 @@ Steps, each committed only when the gates pass:
 | Step | Work | Done when |
 |------|------|-----------|
 | 9a | A link interface in `session.c`: the serial link becomes one implementation of a small table of operations (send, recv, is_up, generation, unacked, pump) | every existing test passes unchanged; no behaviour change |
-| 9b | The TCP link: `u16`-length messages, keepalive and 10 s dead timer, unencrypted for now and only reachable from tests | the session and `exec` tests run over a socketpair as well as the simulated serial line |
+| 9b | The TCP link: `u16`-length messages, keepalive and 10 s dead timer, unencrypted for now and only reachable from tests | sessions run over a socketpair; the timers hold to the millisecond in virtual time. (`exec` over TCP moved to 9e: its tests open one session after another on a line, and over TCP each needs a new connection, which only an accepting agent has) |
 | 9c | Noise: vendored Monocypher, HMAC and PBKDF2 over the existing SHA-256, the `NNpsk0` handshake and transport messages | Noise's published vectors for `Noise_NNpsk0_25519_ChaChaPoly_SHA256` pass; tampered and wrong-key sessions fail as specified |
 | 9d | Transports and addressing: POSIX TCP connect for the client, Winsock 1.1 listen/accept for the agent (`wsock32`, present on 98 and 2000), `DEVLINK_LINE=tcp:HOST[:PORT]`, the multiplexer naming its socket for a TCP target | the Linux client runs `exec`, `put`, `get` and `sync` against the Linux agent over TCP |
-| 9e | Several sessions in the agent: serial and every TCP connection served at once, EXEC slots shared, `@stop` ending all of them | a test holds a serial session and two TCP sessions open, runs a command on each, and each output arrives whole on its own connection only |
+| 9e | Several sessions in the agent: serial and every TCP connection served at once, EXEC slots shared, `@stop` ending all of them | a test holds a serial session and two TCP sessions open, runs a command on each, and each output arrives whole on its own connection only; the `exec` suite passes over TCP as well as serial |
 | 9f | The window: TCP listener and connected clients | shown on the A21m (or the 2000 VM) |
 | 9g | Measure and fix the PBKDF2 iteration count on the A21m; set the TCP deflate level from measured throughput | numbers recorded here; the protocol's figure made final |
 | 9h | On the A21m, once the card is fitted | the full suite over TCP, beside a serial session |

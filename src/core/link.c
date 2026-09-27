@@ -768,7 +768,7 @@ static void if_free(void *impl)
 
 static const struct wl_link_ops serial_ops = {
     if_rx,     if_poll_tx, if_next_timeout, if_send,   if_recv,
-    if_unacked, if_is_up,  if_generation,   if_failed, if_free,
+    if_unacked, if_is_up,  if_generation,   if_failed, if_free,   NULL,
 };
 
 void wl_link_as_if(struct wl_link *l, struct wl_linkif *out)

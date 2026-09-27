@@ -19,15 +19,25 @@ wl_status wl_linkif_pump(struct wl_linkif *l, struct wl_transport *t, uint32_t m
     uint8_t wire[WL_LINKIF_WIRE];
     uint8_t buf[4096];
     size_t got;
+    size_t room = sizeof(buf);
     uint32_t wait;
     wl_status s = flush_tx(l, t, wire);
 
     if (s != WL_OK)
         return s;
+    if (l->ops->rx_room != NULL) {
+        room = l->ops->rx_room(l->impl);
+        if (room > sizeof(buf))
+            room = sizeof(buf);
+        /* Nowhere to put input: the session above has to drain first, and it
+         * runs as soon as this returns. */
+        if (room == 0)
+            return l->ops->failed(l->impl);
+    }
     wait = l->ops->next_timeout(l->impl, wl_clock_ms());
     if (wait > max_wait_ms)
         wait = max_wait_ms;
-    s = wl_transport_read(t, buf, sizeof(buf), &got, wait);
+    s = wl_transport_read(t, buf, room, &got, wait);
     if (s != WL_OK)
         return s;
     if (got > 0)

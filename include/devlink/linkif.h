@@ -37,6 +37,12 @@ struct wl_link_ops {
      * it never will, with the message recorded by wl_fail(). */
     wl_status (*failed)(const void *impl);
     void (*free)(void *impl);
+    /* Optional: how many more bytes rx will take now. A link with its own
+     * flow control (serial) leaves it NULL and takes anything, dropping what
+     * it cannot hold for the peer to resend. One that relies on TCP's (the
+     * TCP link) stops the pump reading while its session is behind, so the
+     * backlog waits in the kernel and the peer's sender blocks. */
+    size_t (*rx_room)(const void *impl);
 };
 
 struct wl_linkif {
