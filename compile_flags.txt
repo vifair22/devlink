@@ -10,6 +10,8 @@
 -Iinclude
 -isystem
 third_party/zlib
+-isystem
+third_party/monocypher
 -std=c11
 -D_GNU_SOURCE
 -DW98LINK_VERSION="0.0.0_editor"
