@@ -1,7 +1,7 @@
 # devlink Manual
 
 A compressed, reliable link between a Linux workstation and a Windows 2000 or
-NT machine, over a serial cable now and over TCP later. This manual covers
+NT machine, over a serial cable, over TCP, or both at once. This manual covers
 installation, operation, tuning, diagnosis and the limits of the thing.
 
 For the wire format see `docs/protocol.md`; for what is built and what is not,
@@ -133,7 +133,7 @@ agent will say so and exit.
 ## 5. Running the agent
 
 ```
-DEVLINK serve [PORT] [BAUD]      defaults: COM1 115200
+DEVLINK serve [PORT] [BAUD] [TCPPORT]   defaults: COM1 115200 2098
 DEVLINK --version
 DEVLINK echo [PORT] [BAUD] [IDLE_SECONDS]
 DEVLINK linktest [PORT] [BAUD] [WAIT_SECONDS]
@@ -149,12 +149,60 @@ launcher can restart it, which is how an update is applied.
 
 **Console output.** Each line is timestamped: sessions starting, commands
 run, transfers, and failures. It is the first place to look when the client
-reports something odd.
+reports something odd. Lines about a TCP session start with the client's
+address in brackets, `[10.0.2.2:1052] exec: ver`; serial lines have no prefix.
+
+### Over TCP
+
+The agent listens on TCP as well as serving its serial port, but only when
+`DEVLINK.KEY`, beside the program, holds a passphrase on its first line.
+Without that file there is no listener at all: the agent never accepts an
+unauthenticated connection. The startup lines say which it is:
+
+```
+devlink agent 0.1.0_20260927.0834.agent serving on COM1 at 115200
+TCP: listening on port 2098, encrypted with the passphrase in C:\DEVLINK\DEVLINK.KEY
+```
+
+or `TCP: off (no C:\DEVLINK\DEVLINK.KEY)`. `TCPPORT` moves the listener off
+2098. A `PORT` of `none` serves TCP alone, with no serial port opened, and is
+refused when there is no key either, since there would be nothing to serve.
+
+**The key file.** One line, the passphrase, in any line ending; the first line
+is all that is read. Keep it readable by administrators only. The client needs
+the same passphrase (section 6). The agent turns it into a key once, at
+startup, which is deliberately slow (about a second on the target), so a
+changed passphrase takes effect when the agent is restarted.
+
+**Everything at once.** Serial and every TCP client are served together, each
+in its own session, and each is answered only over the connection it came in
+on. They share the agent: eight commands at a time across all sessions,
+whichever session asks first, and the same file system, with no locking
+between them (as there is none between two commands on one session). Up to
+eight TCP connections are served at once; a ninth is closed at once with a
+log line rather than left waiting.
+
+**A wrong passphrase** is logged, `[10.0.2.2:1061] session ended: tcp link:
+the client does not hold the same passphrase`, and nothing is said to the
+client: its connection simply closes. That address is then ignored for two
+seconds, which puts guessing at a pace a real passphrase survives, and makes
+no difference to someone who simply typed it wrong.
+
+**What it protects, and what not.** Everything on a TCP connection is
+encrypted and authenticated (docs/protocol.md, "Link layer: TCP"): nobody
+without the passphrase can run commands, read the traffic or change it, and a
+recorded session stays unreadable if the passphrase leaks later. Anyone who
+has the passphrase is fully trusted, exactly as someone at the serial cable
+is; there is one passphrase per agent, not one per user. Serial is not
+encrypted: the cable is physical access to the machine already.
+
+`@stop` from any session stops the agent, and so ends every session; the
+others see their connection close.
 
 ### The agent in a window
 
 ```
-DEVLINKW [-tray] [PORT] [BAUD]   defaults: COM1 115200
+DEVLINKW [-tray] [-tcp TCPPORT] [PORT] [BAUD]   defaults: COM1 115200, TCP 2098
 ```
 
 `DEVLINKW.EXE` serves exactly as `DEVLINK serve` does, with a window instead
@@ -164,7 +212,8 @@ and be left alone.
 The window is in three parts:
 
 - **What is running now**, one line per live piece of work: the kind
-  (`command`, `sending`, `receiving`, `sync`), the command line or the path,
+  (`command`, `sending`, `receiving`, `sync`), whose it is (`serial`, or a TCP
+  client's address), the command line or the path,
   how many bytes have moved, and for how long. This is the part a console
   cannot show. Since the multiplexer landed, one session can carry eight
   commands, four transfers and a sync at once, and a scrolling log can only
@@ -175,8 +224,9 @@ The window is in three parts:
   while work continues, and scrolling to the bottom again resumes following.
   Selecting a line does not stop it: a reader who clicks one still wants to
   watch.
-- **The status bar**: who is connected, the port and rate, and the totals for
-  this run.
+- **The status bar**: who is connected on serial, the port and rate, TCP (off
+  and why, the port with no clients, the one client's address, or how many),
+  and the totals for this run.
 
 `Stop` ends serving and releases the port, and `Start` begins again. Stopping
 is cooperative: the agent finishes the exchange it is in, unwinds its commands
@@ -211,7 +261,7 @@ separate programs rather than one.
 ### The Linux agent
 
 ```
-devlink-agent serve [PORT] [BAUD]      defaults: /dev/ttyS0 115200
+devlink-agent serve [PORT] [BAUD] [TCPPORT]   defaults: /dev/ttyS0 115200 2098
 devlink-agent echo [PORT] [BAUD] [IDLE_SECONDS]
 devlink-agent linktest [PORT] [BAUD] [WAIT_SECONDS]
 devlink-agent --version
@@ -232,6 +282,9 @@ It is linked statically, so it needs nothing from the image but a kernel. The
 second form is how the image's own toolchain builds it; its objects, zlib's
 included, are kept under `build/linux-agent/` apart from the client's because
 they may be for another architecture.
+
+TCP works as on Windows ("Over TCP" above), with the key in `DEVLINK.KEY`
+beside the binary.
 
 It is meant to run under init, which restarts it when it exits. That makes
 `@stop` the whole update procedure: `put` the new binary over the old one
@@ -255,7 +308,10 @@ true of the agent the test suite runs:
 
 Every command takes `--line` and `--baud`. `--line` defaults to
 `/dev/ttyUSB0`, or `$DEVLINK_LINE` if that is set; `--baud` defaults to
-115200. Setting `DEVLINK_LINE` once is the convenient way:
+115200, and means nothing over TCP. A line is a serial device, or
+`tcp:HOST[:PORT]` for an agent listening on TCP (port 2098 unless given;
+`HOST` may be a name, an IPv4 address, or an IPv6 one in brackets,
+`tcp:[fe80::1]:2098`). Setting `DEVLINK_LINE` once is the convenient way:
 
 ```sh
 export DEVLINK_LINE=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AG0JT9KH-if00-port0
@@ -263,6 +319,21 @@ export DEVLINK_LINE=/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AG0JT9KH-if00-por
 
 The `by-id` path is worth using: `/dev/ttyUSB0` moves when another USB serial
 device is plugged in first.
+
+**Over TCP** the client needs the agent's passphrase, in a file whose first
+line it is: `~/.config/devlink/key`, or the file `$DEVLINK_KEY` names. Keep it
+readable by you only (`chmod 600`). Every command then works as over serial,
+encrypted, and faster by as much as the network and the target's CPU allow.
+
+```sh
+export DEVLINK_LINE=tcp:192.168.1.40
+devlink exec ver
+```
+
+A command that fails with "the peer closed the connection before the
+handshake finished" was refused by the agent: the passphrase differs from the
+one in its `DEVLINK.KEY` (its log says so), or something other than a devlink
+agent is on that port.
 
 ### exec
 
@@ -555,6 +626,11 @@ session dies and everything it was running is killed. Run `devlink exec` in one
 terminal and `devlink put` in another and the first one's command is gone. That
 has cost a real installation part-way through.
 
+Over TCP the agent serves any number of sessions at once, so separate
+commands no longer displace each other there; the multiplexer is still worth
+it for the handshake and compression context it saves. Over TCP it holds one
+connection, and exits when that ends; the next command starts a new one.
+
 The multiplexer fixes this without any change to the agent or the wire. One
 process owns the port and keeps a single session; every other command reaches
 the agent through a Unix socket and is given a channel of its own. The protocol
@@ -655,7 +731,7 @@ which matters when something else is passing bytes through the same port.
 
 ### echo and linktest
 
-Diagnostics; see section 9.
+Diagnostics for the serial link itself, so serial only; see section 9.
 
 ## 7. The development loop
 

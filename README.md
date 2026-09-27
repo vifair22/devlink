@@ -18,8 +18,9 @@ code for them is kept, but nothing is verified on them any more; see
 `docs/plan.md`. The names in this repo still say 98, from when it was the
 target, and change when the project is named.
 
-The first transport is a null-modem serial cable; TCP follows once the target
-has a working network card.
+Two transports: a null-modem serial cable, and TCP, encrypted with a
+pre-shared passphrase (Noise, ChaCha20-Poly1305). The agent serves both at
+once, and any number of TCP clients; see `Manual.md`, "Over TCP".
 
 - `Manual.md` is the operating manual: installing, running, tuning,
   diagnosing, and what the limits are.

@@ -35,18 +35,26 @@
 #define WL_MON_LOG_LINES 512U
 #define WL_MON_LINE_MAX 304U
 
-/* WL_AGENT_MAX_EXEC + WL_AGENT_MAX_XFER + one sync is 13; the slack is there
- * so a future slot count does not silently start dropping rows. */
-#define WL_MON_ROWS 16U
+/* Eight commands across every session, plus four transfers and a sync for
+ * each session that is running them: serial and a few TCP clients fit with
+ * room to spare, and past that only a display row is lost, never the work. */
+#define WL_MON_ROWS 64U
 
-/* No session, a session whose client has not said who it is yet, and a client
- * that has. The window adds "stopped" itself: whether the agent thread is
- * running is something it knows and the model does not. */
+/* A session's name: "serial", or a TCP client's address. */
+#define WL_MON_SESSION_MAX 64U
+
+/* The serial session: none, a session whose client has not said who it is
+ * yet, and a client that has. The window adds "stopped" itself: whether the
+ * agent thread is running is something it knows and the model does not. TCP
+ * clients are listed separately (wl_monitor_tcp_client), since there can be
+ * several and each is either connected or gone. */
 enum { WL_MON_WAITING = 0, WL_MON_LINKED = 1, WL_MON_SERVING = 2 };
 
 /* One piece of work in progress. total is 0 when the size is not known in
  * advance, which is every command and every sync. */
 struct wl_mon_row {
+    char session[WL_MON_SESSION_MAX]; /* whose work: channels are per session */
+    uint8_t tcp;
     uint16_t ch;
     uint8_t kind; /* WL_KIND_EXEC, _PUT, _GET, _SYNC */
     uint64_t done;
@@ -54,6 +62,14 @@ struct wl_mon_row {
     uint32_t started_ms; /* wl_clock_ms when the work opened */
     char name[WL_PATH_MAX];
 };
+
+/* A connected TCP client. build is empty until it has identified itself. */
+struct wl_mon_client {
+    char name[WL_MON_SESSION_MAX];
+    char build[WL_PEER_BUILD_MAX + 1];
+};
+
+#define WL_MON_CLIENTS WL_AGENT_MAX_CONN
 
 struct wl_mon_totals {
     uint32_t sessions;
@@ -99,6 +115,10 @@ uint32_t wl_monitor_generation(const struct wl_monitor *m);
 unsigned wl_monitor_rows(const struct wl_monitor *m);
 /* NULL past the last row. Rows keep the order the work started in. */
 const struct wl_mon_row *wl_monitor_row(const struct wl_monitor *m, unsigned i);
+
+unsigned wl_monitor_tcp_clients(const struct wl_monitor *m);
+/* In the order they connected; NULL past the last. */
+const struct wl_mon_client *wl_monitor_tcp_client(const struct wl_monitor *m, unsigned i);
 
 unsigned wl_monitor_log_lines(const struct wl_monitor *m);
 /* Oldest line still held is 0, so a display walks 0..lines-1 top to bottom.

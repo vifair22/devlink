@@ -10,6 +10,8 @@ struct wl_monitor {
     char client[WL_PEER_BUILD_MAX + 1];
     struct wl_mon_row rows[WL_MON_ROWS];
     unsigned n_rows;
+    struct wl_mon_client clients[WL_MON_CLIENTS];
+    unsigned n_clients;
     char log[WL_MON_LOG_LINES][WL_MON_LINE_MAX];
     unsigned log_at;    /* where the next line goes */
     unsigned log_count; /* lines held, up to WL_MON_LOG_LINES */
@@ -34,6 +36,7 @@ void wl_monitor_reset(struct wl_monitor *m)
     m->state = WL_MON_WAITING;
     m->client[0] = '\0';
     m->n_rows = 0;
+    m->n_clients = 0;
     m->gen++;
 }
 
@@ -71,11 +74,26 @@ void wl_monitor_note(struct wl_monitor *m, uint64_t local_time, const char *msg)
     m->gen++;
 }
 
-static struct wl_mon_row *find_row(struct wl_monitor *m, uint16_t ch)
+/* An event's session, with the unnamed ones (from before TCP) as serial. */
+static const char *session_of(const struct wl_agent_event *e)
+{
+    return e->session != NULL ? e->session : "serial";
+}
+
+static struct wl_mon_row *find_row(struct wl_monitor *m, const char *session, uint16_t ch)
 {
     for (unsigned i = 0; i < m->n_rows; i++) {
-        if (m->rows[i].ch == ch)
+        if (m->rows[i].ch == ch && strcmp(m->rows[i].session, session) == 0)
             return &m->rows[i];
+    }
+    return NULL;
+}
+
+static struct wl_mon_client *find_client(struct wl_monitor *m, const char *name)
+{
+    for (unsigned i = 0; i < m->n_clients; i++) {
+        if (strcmp(m->clients[i].name, name) == 0)
+            return &m->clients[i];
     }
     return NULL;
 }
@@ -96,17 +114,80 @@ static void drop_row(struct wl_monitor *m, struct wl_mon_row *r)
     memset(&m->rows[m->n_rows], 0, sizeof(m->rows[0]));
 }
 
+/* A session's work died with it; everyone else's carries on. */
+static void drop_session_rows(struct wl_monitor *m, const char *session)
+{
+    unsigned i = 0;
+
+    while (i < m->n_rows) {
+        if (strcmp(m->rows[i].session, session) == 0)
+            drop_row(m, &m->rows[i]);
+        else
+            i++;
+    }
+}
+
+static void drop_client(struct wl_monitor *m, struct wl_mon_client *c)
+{
+    unsigned i = (unsigned)(c - m->clients);
+
+    if (i + 1U < m->n_clients)
+        memmove(c, c + 1, (m->n_clients - i - 1U) * sizeof(*c));
+    m->n_clients--;
+}
+
+/* The TCP half of wl_monitor_event: the list of clients. Returns nonzero if
+ * anything changed. */
+static int tcp_event(struct wl_monitor *m, const struct wl_agent_event *e)
+{
+    const char *name = session_of(e);
+    struct wl_mon_client *c = find_client(m, name);
+
+    switch (e->type) {
+    case WL_EV_CONNECTED:
+        if (c != NULL || m->n_clients >= WL_MON_CLIENTS)
+            return 0;
+        c = &m->clients[m->n_clients++];
+        memset(c, 0, sizeof(*c));
+        copy_into(c->name, sizeof(c->name), name);
+        return 1;
+    case WL_EV_SESSION:
+        m->tot.sessions++;
+        return 1;
+    case WL_EV_READY:
+        if (c == NULL)
+            return 0;
+        copy_into(c->build, sizeof(c->build), e->text);
+        return 1;
+    case WL_EV_GONE:
+    case WL_EV_DISCONNECTED:
+        drop_session_rows(m, name);
+        if (c != NULL)
+            drop_client(m, c);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 void wl_monitor_event(struct wl_monitor *m, const struct wl_agent_event *e)
 {
+    const char *session = session_of(e);
     struct wl_mon_row *r;
 
+    if (e->tcp && e->type != WL_EV_CHANNEL && e->type != WL_EV_PROGRESS &&
+        e->type != WL_EV_FINISHED) {
+        if (tcp_event(m, e))
+            m->gen++;
+        return;
+    }
     switch (e->type) {
     case WL_EV_SESSION:
         /* Whatever the last client had running died with it (on_session in
-         * the agent ends all of it), so the list starts empty here too. */
+         * the agent ends all of it), so its rows go here too. */
         m->state = WL_MON_LINKED;
         m->client[0] = '\0';
-        m->n_rows = 0;
+        drop_session_rows(m, session);
         m->tot.sessions++;
         break;
     case WL_EV_READY:
@@ -116,7 +197,7 @@ void wl_monitor_event(struct wl_monitor *m, const struct wl_agent_event *e)
     case WL_EV_GONE:
         m->state = WL_MON_WAITING;
         m->client[0] = '\0';
-        m->n_rows = 0;
+        drop_session_rows(m, session);
         break;
     case WL_EV_CHANNEL:
         /* Cannot happen with the agent's current slot counts, and if it ever
@@ -125,6 +206,8 @@ void wl_monitor_event(struct wl_monitor *m, const struct wl_agent_event *e)
             return;
         r = &m->rows[m->n_rows++];
         memset(r, 0, sizeof(*r));
+        copy_into(r->session, sizeof(r->session), session);
+        r->tcp = e->tcp;
         r->ch = e->ch;
         r->kind = e->kind;
         r->total = e->total;
@@ -136,7 +219,7 @@ void wl_monitor_event(struct wl_monitor *m, const struct wl_agent_event *e)
             m->tot.transfers++;
         break;
     case WL_EV_PROGRESS:
-        r = find_row(m, e->ch);
+        r = find_row(m, session, e->ch);
         if (r == NULL)
             return;
         /* Counted from the start of the work, so the lifetime total moves by
@@ -149,7 +232,7 @@ void wl_monitor_event(struct wl_monitor *m, const struct wl_agent_event *e)
             r->total = e->total;
         break;
     case WL_EV_FINISHED:
-        r = find_row(m, e->ch);
+        r = find_row(m, session, e->ch);
         if (r == NULL)
             return;
         drop_row(m, r);
@@ -185,6 +268,16 @@ unsigned wl_monitor_rows(const struct wl_monitor *m)
 const struct wl_mon_row *wl_monitor_row(const struct wl_monitor *m, unsigned i)
 {
     return i < m->n_rows ? &m->rows[i] : NULL;
+}
+
+unsigned wl_monitor_tcp_clients(const struct wl_monitor *m)
+{
+    return m->n_clients;
+}
+
+const struct wl_mon_client *wl_monitor_tcp_client(const struct wl_monitor *m, unsigned i)
+{
+    return i < m->n_clients ? &m->clients[i] : NULL;
 }
 
 unsigned wl_monitor_log_lines(const struct wl_monitor *m)

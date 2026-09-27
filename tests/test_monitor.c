@@ -373,6 +373,76 @@ static void test_a_running_command_is_listed_while_it_runs(void **state)
     assert_true(tot.bytes >= 3); /* "go\n" */
 }
 
+static void send_tcp(uint8_t type, const char *session, uint16_t ch, uint8_t kind,
+                     const char *text)
+{
+    struct wl_agent_event e;
+
+    memset(&e, 0, sizeof(e));
+    e.type = type;
+    e.ch = ch;
+    e.kind = kind;
+    e.text = text;
+    e.session = session;
+    e.tcp = 1;
+    wl_monitor_event(mon, &e);
+}
+
+/* Channel numbers belong to a session, so two clients' channel 1 are two
+ * different pieces of work, and each finishes on its own. */
+static void test_sessions_keep_their_own_channels(void **state)
+{
+    (void)state;
+    send_event(WL_EV_CHANNEL, 1, WL_KIND_EXEC, "serial work", 0, 0);
+    send_tcp(WL_EV_CONNECTED, "10.0.0.5:4000", 0, 0, NULL);
+    send_tcp(WL_EV_CHANNEL, "10.0.0.5:4000", 1, WL_KIND_EXEC, "tcp work");
+    assert_int_equal(wl_monitor_rows(mon), 2);
+    assert_string_equal(wl_monitor_row(mon, 1)->session, "10.0.0.5:4000");
+    assert_int_equal(wl_monitor_row(mon, 1)->tcp, 1);
+    send_tcp(WL_EV_FINISHED, "10.0.0.5:4000", 1, 0, NULL);
+    assert_int_equal(wl_monitor_rows(mon), 1);
+    assert_string_equal(wl_monitor_row(mon, 0)->name, "serial work");
+    assert_string_equal(wl_monitor_row(mon, 0)->session, "serial");
+}
+
+static void test_tcp_clients_come_and_go(void **state)
+{
+    (void)state;
+    send_tcp(WL_EV_CONNECTED, "10.0.0.5:4000", 0, 0, NULL);
+    send_tcp(WL_EV_CONNECTED, "10.0.0.6:4001", 0, 0, NULL);
+    assert_int_equal(wl_monitor_tcp_clients(mon), 2);
+    assert_string_equal(wl_monitor_tcp_client(mon, 0)->build, "");
+    send_tcp(WL_EV_SESSION, "10.0.0.5:4000", 0, 0, NULL);
+    send_tcp(WL_EV_READY, "10.0.0.5:4000", 0, 0, "0.1.0_20260927.0900.release");
+    assert_string_equal(wl_monitor_tcp_client(mon, 0)->build, "0.1.0_20260927.0900.release");
+    /* The serial session is untouched by any of it. */
+    assert_int_equal(wl_monitor_state(mon), WL_MON_WAITING);
+    send_tcp(WL_EV_DISCONNECTED, "10.0.0.5:4000", 0, 0, NULL);
+    assert_int_equal(wl_monitor_tcp_clients(mon), 1);
+    assert_string_equal(wl_monitor_tcp_client(mon, 0)->name, "10.0.0.6:4001");
+    assert_null(wl_monitor_tcp_client(mon, 1));
+}
+
+static void test_a_session_ending_takes_only_its_own_work(void **state)
+{
+    (void)state;
+    send_event(WL_EV_SESSION, 0, 0, NULL, 0, 0);
+    send_event(WL_EV_CHANNEL, 1, WL_KIND_EXEC, "serial work", 0, 0);
+    send_tcp(WL_EV_CONNECTED, "10.0.0.5:4000", 0, 0, NULL);
+    send_tcp(WL_EV_CHANNEL, "10.0.0.5:4000", 1, WL_KIND_PUT, "upload");
+    send_tcp(WL_EV_CHANNEL, "10.0.0.5:4000", 3, WL_KIND_EXEC, "build");
+    send_tcp(WL_EV_DISCONNECTED, "10.0.0.5:4000", 0, 0, NULL);
+    assert_int_equal(wl_monitor_rows(mon), 1);
+    assert_string_equal(wl_monitor_row(mon, 0)->name, "serial work");
+    /* And the serial client leaving takes only its own. */
+    send_tcp(WL_EV_CONNECTED, "10.0.0.6:4001", 0, 0, NULL);
+    send_tcp(WL_EV_CHANNEL, "10.0.0.6:4001", 1, WL_KIND_EXEC, "still going");
+    send_event(WL_EV_GONE, 0, 0, NULL, 0, 0);
+    assert_int_equal(wl_monitor_rows(mon), 1);
+    assert_string_equal(wl_monitor_row(mon, 0)->name, "still going");
+    assert_int_equal(wl_monitor_tcp_clients(mon), 1);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -396,6 +466,12 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_more_work_than_rows_does_not_run_off_the_end,
                                         model_setup, model_teardown),
         cmocka_unit_test_setup_teardown(test_a_restart_clears_the_work_but_keeps_the_log,
+                                        model_setup, model_teardown),
+        cmocka_unit_test_setup_teardown(test_sessions_keep_their_own_channels, model_setup,
+                                        model_teardown),
+        cmocka_unit_test_setup_teardown(test_tcp_clients_come_and_go, model_setup,
+                                        model_teardown),
+        cmocka_unit_test_setup_teardown(test_a_session_ending_takes_only_its_own_work,
                                         model_setup, model_teardown),
         cmocka_unit_test_setup_teardown(test_a_running_command_is_listed_while_it_runs,
                                         live_setup, live_teardown),

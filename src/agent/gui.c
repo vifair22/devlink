@@ -8,12 +8,14 @@
 #include <shellapi.h>
 
 #include "devlink/agent.h"
+#include "devlink/agent_tcp.h"
 #include "devlink/clock.h"
 #include "devlink/monitor.h"
 #include "devlink/paths.h"
 #include "devlink/proto.h"
 #include "devlink/transport.h"
 #include "devlink/version.h"
+#include "keypath.h"
 
 /*
  * The agent with a window instead of a console.
@@ -69,9 +71,10 @@
  * this means something is genuinely stuck. */
 #define CLOSE_WAIT_MS 8000U
 
-/* Three columns hold a known shape of text; the fourth is the command line or
+/* Four columns hold a known shape of text; the detail is the command line or
  * the path, so it takes whatever width is left. */
 #define COL_WHAT 90
+#define COL_CLIENT 120
 #define COL_PROGRESS 170
 #define COL_ELAPSED 70
 
@@ -103,6 +106,11 @@ struct app {
 
     char port[32];
     unsigned long baud;
+    unsigned long tcp_want; /* the port to listen on when there is a key */
+    /* What the worker found: the port it listens on, 0 when TCP is off, and
+     * why it is off. Written by the worker, read by the window, under lock. */
+    unsigned tcp_port;
+    char tcp_note[96];
 
     /* Replacing itself. The paths are taken once at startup, before anything
      * is renamed, so they still name this program afterwards. */
@@ -117,6 +125,7 @@ struct app {
     uint32_t drawn_gen;
     uint32_t drawn_notes;
     int drawn_state;
+    unsigned drawn_tcp;
     unsigned long drawn_seconds;
 };
 
@@ -164,9 +173,12 @@ static int should_stop(void *ctx)
 static DWORD WINAPI serve(LPVOID arg)
 {
     struct wl_agent_cfg cfg;
+    struct wl_agent_tcp tcp;
     struct wl_transport t;
     OSVERSIONINFOA vi;
-    char msg[256];
+    char msg[320];
+    char key[MAX_PATH];
+    int serial = strcmp(app.port, "none") != 0;
 
     (void)arg;
     memset(&cfg, 0, sizeof(cfg));
@@ -180,18 +192,50 @@ static DWORD WINAPI serve(LPVOID arg)
     cfg.log = on_log;
     cfg.event = on_event;
 
-    if (wl_serial_open(app.port, (uint32_t)app.baud, &t) != WL_OK) {
-        (void)snprintf(msg, sizeof(msg), "cannot open %s: %s", app.port, wl_error());
+    /* TCP first: its key decides whether there is a listener at all, and a
+     * listener that cannot open is worth saying before serial starts. */
+    memset(&tcp, 0, sizeof(tcp));
+    if (!agent_key_path(key, sizeof(key)) ||
+        wl_agent_tcp_open(key, NULL, (uint16_t)app.tcp_want, &tcp) != WL_OK) {
+        (void)snprintf(msg, sizeof(msg), "TCP: %s", wl_error());
+        note(msg);
+        tcp.l = NULL;
+    }
+    EnterCriticalSection(&app.lock);
+    app.tcp_port = tcp.l != NULL ? tcp.port : 0U;
+    (void)snprintf(app.tcp_note, sizeof(app.tcp_note), "%s",
+                   tcp.l != NULL ? "" : "TCP off: no DEVLINK.KEY");
+    LeaveCriticalSection(&app.lock);
+    if (tcp.l != NULL) {
+        (void)snprintf(msg, sizeof(msg), "TCP: listening on port %u, encrypted with %s",
+                       (unsigned)tcp.port, key);
         note(msg);
     } else {
-        (void)snprintf(msg, sizeof(msg), "serving on %s at %lu", app.port, app.baud);
+        (void)snprintf(msg, sizeof(msg), "TCP: off (no %s)", key);
         note(msg);
-        if (wl_agent_serve(&t, &cfg, (uint32_t)GetTickCount() ^ (uint32_t)GetCurrentProcessId())
-            != WL_OK)
+    }
+
+    if (serial && wl_serial_open(app.port, (uint32_t)app.baud, &t) != WL_OK) {
+        (void)snprintf(msg, sizeof(msg), "cannot open %s: %s", app.port, wl_error());
+        note(msg);
+    } else if (!serial && tcp.l == NULL) {
+        note("nothing to serve: no serial port and no TCP");
+    } else {
+        if (serial) {
+            (void)snprintf(msg, sizeof(msg), "serving on %s at %lu", app.port, app.baud);
+            note(msg);
+        }
+        if (wl_agent_run(serial ? &t : NULL, tcp.l != NULL ? &tcp.listener : NULL, &cfg,
+                         (uint32_t)GetTickCount() ^ (uint32_t)GetCurrentProcessId()) != WL_OK)
             note(wl_error());
-        wl_transport_close(&t);
+        if (serial)
+            wl_transport_close(&t);
         note("stopped");
     }
+    wl_agent_tcp_close(&tcp);
+    EnterCriticalSection(&app.lock);
+    app.tcp_port = 0;
+    LeaveCriticalSection(&app.lock);
     (void)PostMessage(app.wnd, WM_AGENT_DONE, 0, 0);
     return 0;
 }
@@ -277,9 +321,12 @@ static void row_text(const struct wl_mon_row *r, int col, char *out, size_t cap)
         (void)snprintf(out, cap, "%s", kind_name(r->kind));
         break;
     case 1:
-        (void)snprintf(out, cap, "%s", r->name);
+        (void)snprintf(out, cap, "%s", r->session);
         break;
     case 2:
+        (void)snprintf(out, cap, "%s", r->name);
+        break;
+    case 3:
         human(r->done, a, sizeof(a));
         if (r->kind == WL_KIND_EXEC) {
             /* A command has no size to work towards, so there is no percentage
@@ -654,11 +701,12 @@ static void about_box(void)
 
     (void)snprintf(text, sizeof(text),
                    "devlink agent %s\n\n"
-                   "Serves a devlink client over %s at %lu.\n"
+                   "Serves devlink clients over %s at %lu, and over TCP on port %lu\n"
+                   "when DEVLINK.KEY beside it holds a passphrase.\n"
                    "The same agent as DEVLINK.EXE, with a window instead of a console.\n\n"
                    "The list shows what is running now; the log shows what has happened.\n"
                    "Minimising puts it in the notification area; -tray starts it there.",
-                   wl_version(), app.port, app.baud);
+                   wl_version(), app.port, app.baud, app.tcp_want);
     (void)MessageBoxA(app.wnd, text, "About devlink", MB_ICONINFORMATION | MB_OK);
 }
 
@@ -679,9 +727,10 @@ static void create_children(void)
         (void)SendMessageA(app.list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0,
                            LVS_EX_FULLROWSELECT | LVS_EX_HEADERDRAGDROP);
         add_column(app.list, 0, "What", COL_WHAT);
-        add_column(app.list, 1, "Detail", 300);
-        add_column(app.list, 2, "Progress", COL_PROGRESS);
-        add_column(app.list, 3, "Elapsed", COL_ELAPSED);
+        add_column(app.list, 1, "Client", COL_CLIENT);
+        add_column(app.list, 2, "Detail", 300);
+        add_column(app.list, 3, "Progress", COL_PROGRESS);
+        add_column(app.list, 4, "Elapsed", COL_ELAPSED);
     }
     /* Long log lines are worth scrolling to rather than wrapping: a wrapped
      * path in a fixed list is harder to read than one that runs off. The
@@ -754,11 +803,12 @@ static void layout(void)
         /* Roughly the vertical scrollbar plus the frame: enough that the
          * detail column stops short of one rather than forcing a horizontal
          * scrollbar by a few pixels. */
-        int slack = rc.right - (2 * pad) - COL_WHAT - COL_PROGRESS - COL_ELAPSED - 24;
+        int slack =
+            rc.right - (2 * pad) - COL_WHAT - COL_CLIENT - COL_PROGRESS - COL_ELAPSED - 24;
 
         if (slack < 120)
             slack = 120;
-        (void)SendMessageA(app.list, LVM_SETCOLUMNWIDTH, 1, (LPARAM)slack);
+        (void)SendMessageA(app.list, LVM_SETCOLUMNWIDTH, 2, (LPARAM)slack);
     }
     {
         /* Measured before the pane changes size: growing or shrinking it moves
@@ -780,14 +830,15 @@ static void set_part(int part, const char *text)
 static void size_status_parts(void)
 {
     RECT rc;
-    int parts[3];
+    int parts[4];
 
     if (app.status == NULL || !GetClientRect(app.wnd, &rc))
         return;
-    parts[0] = rc.right * 45 / 100;
-    parts[1] = rc.right * 65 / 100;
-    parts[2] = -1;
-    (void)SendMessageA(app.status, SB_SETPARTS, 3, (LPARAM)parts);
+    parts[0] = rc.right * 34 / 100;
+    parts[1] = rc.right * 50 / 100;
+    parts[2] = rc.right * 74 / 100;
+    parts[3] = -1;
+    (void)SendMessageA(app.status, SB_SETPARTS, 4, (LPARAM)parts);
 }
 
 /* Keeps the log's scrollable width at the longest line it has been given. */
@@ -851,6 +902,24 @@ static void refresh_log(void)
         log_to_end();
 }
 
+/*
+ * The TCP part of the status bar: off and why, the port while nobody is on
+ * it, the one client by address, or how many. Called under the lock.
+ */
+static void tcp_text(char *out, size_t cap)
+{
+    unsigned n = wl_monitor_tcp_clients(app.mon);
+
+    if (app.tcp_port == 0U)
+        (void)snprintf(out, cap, "%s", app.tcp_note[0] != '\0' ? app.tcp_note : "TCP off");
+    else if (n == 0U)
+        (void)snprintf(out, cap, "TCP %u: no clients", app.tcp_port);
+    else if (n == 1U)
+        (void)snprintf(out, cap, "TCP %u: %s", app.tcp_port, wl_monitor_tcp_client(app.mon, 0)->name);
+    else
+        (void)snprintf(out, cap, "TCP %u: %u clients", app.tcp_port, n);
+}
+
 static void refresh(void)
 {
     struct wl_mon_totals tot;
@@ -865,7 +934,8 @@ static void refresh(void)
     state = wl_monitor_state(app.mon);
     rows = wl_monitor_rows(app.mon);
     wl_monitor_totals(app.mon, &tot);
-    changed = wl_monitor_generation(app.mon) != app.drawn_gen || state != app.drawn_state;
+    changed = wl_monitor_generation(app.mon) != app.drawn_gen || state != app.drawn_state ||
+              app.tcp_port != app.drawn_tcp;
     /* The elapsed column moves on its own, so a second passing is a change
      * even when nothing was reported. */
     elapsed = (unsigned long)(wl_clock_ms() / 1000U);
@@ -878,11 +948,14 @@ static void refresh(void)
         human(tot.bytes, bytes, sizeof(bytes));
         (void)snprintf(buf, sizeof(buf), "%lu command(s), %lu transfer(s), %s",
                        (unsigned long)tot.commands, (unsigned long)tot.transfers, bytes);
+        set_part(3, buf);
+        tcp_text(buf, sizeof(buf));
         set_part(2, buf);
         (void)SendMessageA(app.list, LVM_SETITEMCOUNT, (WPARAM)rows, 0);
         (void)InvalidateRect(app.list, NULL, FALSE);
         app.drawn_gen = wl_monitor_generation(app.mon);
         app.drawn_state = state;
+        app.drawn_tcp = app.tcp_port;
         app.drawn_seconds = elapsed;
     }
     refresh_log();
@@ -1100,12 +1173,19 @@ static void parse_args(const char *cmd)
 
     (void)snprintf(app.port, sizeof(app.port), "COM1");
     app.baud = 115200UL;
+    app.tcp_want = WL_TCP_DEFAULT_PORT;
     if (cmd == NULL)
         return;
     (void)snprintf(line, sizeof(line), "%s", cmd);
     for (tok = strtok(line, " \t"); tok != NULL; tok = strtok(NULL, " \t")) {
         if (strcmp(tok, "-tray") == 0 || strcmp(tok, "/tray") == 0) {
             app.start_tray = 1;
+        } else if (strcmp(tok, "-tcp") == 0 || strcmp(tok, "/tcp") == 0) {
+            const char *v = strtok(NULL, " \t");
+            unsigned long p = v != NULL ? strtoul(v, NULL, 10) : 0UL;
+
+            if (p != 0 && p <= 65535UL)
+                app.tcp_want = p;
         } else if (seen == 0) {
             (void)snprintf(app.port, sizeof(app.port), "%s", tok);
             seen++;
