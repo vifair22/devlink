@@ -59,7 +59,8 @@ static wl_status fake_accept(void *ctx, struct wl_transport *out, char *peer, si
         fd = l->pending[0];
         memmove(l->pending, l->pending + 1, (size_t)(l->n - 1) * sizeof(int));
         l->n--;
-        (void)read(l->bell[0], &b, 1);
+        ssize_t got = read(l->bell[0], &b, 1);
+        (void)got; /* the byte only wakes poll; its value is not needed */
     }
     (void)pthread_mutex_unlock(&l->mu);
     if (fd < 0)

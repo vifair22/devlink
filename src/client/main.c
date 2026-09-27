@@ -530,7 +530,7 @@ static wl_status open_direct(const char *line, uint32_t baud, struct wl_session_
                              struct wl_transport *t)
 {
     char host[256];
-    uint16_t port;
+    uint16_t port = 0;
     wl_status st = wl_tcp_parse(line, host, sizeof(host), &port);
 
     if (st == WL_ERR_INVAL) {

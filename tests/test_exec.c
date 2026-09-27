@@ -62,7 +62,8 @@ static wl_status one_accept(void *ctx, struct wl_transport *out, char *peer, siz
     (void)ctx;
     if (pending_fd < 0)
         return WL_OK;
-    (void)read(bell[0], &b, 1);
+    ssize_t got = read(bell[0], &b, 1);
+    (void)got; /* the byte only wakes poll; its value is not needed */
     (void)snprintf(peer, cap, "127.0.0.1:%d", pending_fd);
     assert_int_equal(wl_fd_transport(pending_fd, out), WL_OK);
     pending_fd = -1;

@@ -274,7 +274,10 @@ wl_status wl_tcp_connect(const char *host, uint16_t port, uint32_t timeout_ms,
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_NUMERICSERV | AI_ADDRCONFIG;
+    /* No AI_ADDRCONFIG: glibc does not count loopback as configured, so on a
+     * box without a global IPv6 address it hides ::1 itself. An address that
+     * cannot be reached fails fast in the loop below and the next is tried. */
+    hints.ai_flags = AI_NUMERICSERV;
     (void)snprintf(serv, sizeof(serv), "%u", (unsigned)port);
     (void)snprintf(what, sizeof(what), "%s:%u", host, (unsigned)port);
     r = getaddrinfo(host, serv, &hints, &list);
