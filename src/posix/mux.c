@@ -911,14 +911,24 @@ wl_status wl_mux_serve(struct wl_transport *line, const struct wl_mux_cfg *cfg, 
             break;
         (void)flush_stashes(m, &block_up, block_down);
 
-        /* With every client slot taken, a new connection stays in the listen
-         * backlog until one frees, and the socket is not polled meanwhile,
-         * since it would report readable on every pass. */
-        fds[nfds].fd = count_clients(m) < MUX_CLIENTS ? listen_fd : -1;
+        /*
+         * Only what will be read this pass is polled. A descriptor that is
+         * being left alone on purpose still reports readable, so polling it
+         * returns at once, every pass: a client held back because the line
+         * cannot take its records yet kept the relay at 99% of a core for a
+         * whole 2 GB put to the A21m. Such a descriptor waits until what it is
+         * waiting for moves, which arrives on another descriptor (the line's
+         * acknowledgements, or the client's), or until LOOP_MS.
+         *
+         * The listening socket is the same case twice over: connections stay
+         * in its backlog while the line is down and while every client slot
+         * is taken, so it is not polled then either.
+         */
+        fds[nfds].fd = m->up_ready && count_clients(m) < MUX_CLIENTS ? listen_fd : -1;
         fds[nfds].events = POLLIN;
         fds[nfds++].revents = 0;
         if (line_fd >= 0) {
-            fds[nfds].fd = line_fd;
+            fds[nfds].fd = block_up ? -1 : line_fd;
             fds[nfds].events = POLLIN;
             fds[nfds++].revents = 0;
         }
@@ -926,7 +936,7 @@ wl_status wl_mux_serve(struct wl_transport *line, const struct wl_mux_cfg *cfg, 
             if (!m->clients[i].used)
                 continue;
             clients++;
-            fds[nfds].fd = wl_transport_fd(&m->clients[i].t);
+            fds[nfds].fd = block_down[i] ? -1 : wl_transport_fd(&m->clients[i].t);
             fds[nfds].events = POLLIN;
             fds[nfds++].revents = 0;
         }

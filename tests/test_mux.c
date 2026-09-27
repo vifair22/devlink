@@ -108,7 +108,7 @@ static struct wl_session_cfg fast_session(void)
     return cfg;
 }
 
-static int setup_common(int agent_delay_ms)
+static int setup_common(int agent_delay_ms, uint32_t line_bps)
 {
     memset(&h, 0, sizeof(h));
     h.agent_delay_ms = agent_delay_ms;
@@ -119,9 +119,11 @@ static int setup_common(int agent_delay_ms)
     (void)mkdir(h.dir, 0700);
 
     h.agent_cfg.session = fast_session();
+    h.agent_cfg.session.link.bytes_per_sec = line_bps;
     h.agent_cfg.platform = WL_PLATFORM_LINUX;
     h.agent_cfg.stop = agent_should_stop;
     h.mux_cfg.session = fast_session();
+    h.mux_cfg.session.link.bytes_per_sec = line_bps;
     h.mux_cfg.socket_path = h.sock;
     h.mux_cfg.stop = should_stop;
     assert_int_equal(pthread_create(&h.agent_th, NULL, agent_main, NULL), 0);
@@ -132,14 +134,22 @@ static int setup_common(int agent_delay_ms)
 static int setup(void **state)
 {
     (void)state;
-    return setup_common(0);
+    return setup_common(0, 0);
 }
 
 /* The multiplexer is listening well before the agent answers. */
 static int setup_late_agent(void **state)
 {
     (void)state;
-    return setup_common(400);
+    return setup_common(400, 0);
+}
+
+/* Both ends paced to a serial line's rate (half of 115200 baud's, so the test
+ * is quick), so the line, not the pty, is what a transfer waits on. */
+static int setup_paced(void **state)
+{
+    (void)state;
+    return setup_common(0, 57600U);
 }
 
 static int teardown(void **state)
@@ -522,6 +532,69 @@ static void assert_identical(const char *a, const char *b)
 }
 
 /*
+ * A transfer that outruns a serial line has to wait for it, not spin. The
+ * multiplexer stops reading a client whose records the line cannot take yet,
+ * but it kept asking poll about that client's socket, which always had data
+ * waiting, so poll returned at once on every pass: a put to the A21m held the
+ * relay at 99% of a core for the whole transfer. The same held for the line's
+ * descriptor while a slow client held a get back. Its CPU time across a paced
+ * transfer each way has to be a small part of the time the transfer took.
+ */
+static void test_a_transfer_over_a_slow_line_does_not_spin(void **state)
+{
+    struct wl_session_cfg cfg = local_session();
+    struct wl_file_result r;
+    struct wl_transport t;
+    struct timespec c0;
+    struct timespec c1;
+    clockid_t cpu;
+    char local[256];
+    char remote[256];
+    char back[256];
+    uint32_t start;
+    uint32_t wall;
+    uint32_t used;
+    FILE *f;
+
+    (void)state;
+    (void)snprintf(local, sizeof(local), "%s/noise.bin", h.dir);
+    (void)snprintf(remote, sizeof(remote), "%s/noise-sent.bin", h.dir);
+    (void)snprintf(back, sizeof(back), "%s/noise-back.bin", h.dir);
+    f = fopen(local, "wb");
+    assert_non_null(f);
+    /* Noise, so compression cannot shrink it below the line's pace, and far
+     * more than one credit window, so the client is ahead of the line and held
+     * back for most of the transfer, which is the state that spun. */
+    for (uint32_t i = 0, x = 12345U; i < 262144U; i++) {
+        x = x * 1103515245U + 12345U;
+        assert_int_equal(fputc((int)(x >> 16) & 0xFF, f), (int)((x >> 16) & 0xFF));
+    }
+    assert_int_equal(fclose(f), 0);
+    wait_for_the_line();
+    assert_int_equal(pthread_getcpuclockid(h.mux_th, &cpu), 0);
+
+    assert_int_equal(clock_gettime(cpu, &c0), 0);
+    start = wl_clock_ms();
+    assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+    assert_int_equal(wl_client_put(&t, &cfg, 0x9101U, local, remote, 1, 5000, &r), WL_OK);
+    wl_transport_close(&t);
+    assert_int_equal(wl_unix_connect(h.sock, &t), WL_OK);
+    assert_int_equal(wl_client_get(&t, &cfg, 0x9102U, remote, back, 5000, &r), WL_OK);
+    wl_transport_close(&t);
+    wall = wl_clock_since(start);
+    assert_int_equal(clock_gettime(cpu, &c1), 0);
+    assert_identical(local, remote);
+    assert_identical(local, back);
+
+    used = (uint32_t)((c1.tv_sec - c0.tv_sec) * 1000L + (c1.tv_nsec - c0.tv_nsec) / 1000000L);
+    /* It took seconds at this pace, so a spinning relay would use nearly all
+     * of that; one that waits uses a few percent. */
+    assert_true(wall >= 2000U);
+    if (used * 4U >= wall)
+        fail_msg("the multiplexer used %u ms of CPU in %u ms of transfer", used, wall);
+}
+
+/*
  * A file big enough and compressible enough that the relay cannot hand records
  * on as fast as the line delivers them, in both directions.
  *
@@ -708,6 +781,8 @@ int main(void)
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_an_open_lost_to_a_restart_fails_rather_than_hangs,
                                         setup, teardown),
+        cmocka_unit_test_setup_teardown(test_a_transfer_over_a_slow_line_does_not_spin,
+                                        setup_paced, teardown),
         cmocka_unit_test_setup_teardown(test_a_large_compressible_transfer_loses_nothing, setup,
                                         teardown),
         cmocka_unit_test_setup_teardown(
