@@ -53,6 +53,10 @@ struct wl_linkif {
 /* The buffer a pump hands poll_tx: enough for one whole serial frame. */
 #define WL_LINKIF_WIRE 8192U
 
+/* The most one pump takes from the transport before it lets its caller run
+ * again: a whole TCP message, so a fast connection is not read 4 KiB a pass. */
+#define WL_LINKIF_DRAIN 65536U
+
 /*
  * Glue between a link and a real transport, as both programs' main loops use
  * it: sends whatever is due, waits for input no longer than the link's next

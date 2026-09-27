@@ -28,6 +28,7 @@ struct entry {
 
 struct sync {
     struct wl_peer *peer;
+    int pump_now; /* the last turn queued something; see wl_peer_queued */
     struct wl_sync_result *out;
     const char *root; /* local directory */
     enum phase phase;
@@ -393,7 +394,12 @@ wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cf
     connect_start = wl_clock_ms();
     st = WL_OK;
     while (s.phase != PH_DONE && s.phase != PH_FAILED) {
-        st = wl_peer_pump(s.peer, t, PUMP_MS);
+        /* As in file_ops.c: a turn that queued something pumps again at
+         * once (wl_peer_queued). */
+        uint32_t queued = wl_peer_queued(s.peer);
+
+        st = wl_peer_pump(s.peer, t, s.pump_now ? 0U : PUMP_MS);
+        s.pump_now = 0;
         if (st != WL_OK)
             break;
         switch (s.phase) {
@@ -427,6 +433,7 @@ wl_status wl_client_sync(struct wl_transport *t, const struct wl_session_cfg *cf
         default:
             break;
         }
+        s.pump_now = wl_peer_queued(s.peer) != queued;
     }
 out_done:
     /* Closed whether or not the sync finished: see the note in

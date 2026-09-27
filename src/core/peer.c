@@ -37,6 +37,7 @@ struct chan {
 
 struct wl_peer {
     struct wl_session *s;
+    uint32_t queued; /* records the application has queued, ever; see peer.h */
     struct wl_peer_handlers h;
     int is_client;
     uint8_t platform;
@@ -698,6 +699,7 @@ wl_status wl_peer_send(struct wl_peer *p, uint16_t ch, uint8_t type, const uint8
         return wl_fail(WL_ERR_INVAL, "peer: channel %u is not open", (unsigned)ch);
     if (!queue_record(&c->q, ch, type, data, n))
         return WL_ERR_NOSPACE;
+    p->queued++;
     return WL_OK;
 }
 
@@ -769,6 +771,11 @@ unsigned wl_peer_channels_open(const struct wl_peer *p)
             n++;
     }
     return n;
+}
+
+uint32_t wl_peer_queued(const struct wl_peer *p)
+{
+    return p->queued;
 }
 
 int wl_peer_idle(const struct wl_peer *p)

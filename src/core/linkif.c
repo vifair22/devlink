@@ -55,8 +55,28 @@ wl_status wl_linkif_pump(struct wl_linkif *l, struct wl_transport *t, uint32_t m
         }
         return s;
     }
-    if (got > 0)
+    /* Whatever else is already waiting is taken now, without waiting, up to
+     * what a TCP message can be: one 4 KiB read per pass leaves a fast
+     * connection to the speed of the caller's loop. */
+    for (size_t total = got; got > 0;) {
         l->ops->rx(l->impl, buf, got, wl_clock_ms());
+        if (total >= WL_LINKIF_DRAIN)
+            break;
+        room = sizeof(buf);
+        if (l->ops->rx_room != NULL) {
+            size_t r = l->ops->rx_room(l->impl);
+
+            room = r < room ? r : room;
+        }
+        if (room == 0)
+            break;
+        /* A failure here (the peer has just closed, say) waits for the next
+         * pump's first read: what was taken so far has to reach the session
+         * before the connection is reported gone. */
+        if (wl_transport_read(t, buf, room, &got, 0) != WL_OK)
+            break;
+        total += got;
+    }
     s = flush_tx(l, t, wire);
     if (s != WL_OK)
         return s;

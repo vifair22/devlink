@@ -25,10 +25,18 @@
 
 #define WL_SESSION_QUEUE 65536U /* plaintext buffered each way */
 #define WL_SESSION_DEFAULT_LEVEL 9 /* CPU is free next to a 11 KB/s line */
-/* Over TCP the line is no longer the bottleneck and the target's CPU is, so
- * less effort buys more throughput. A first figure; docs/plan.md step 9g
- * measures it on the target. */
+/*
+ * Over TCP the line is no longer the bottleneck; a CPU is. The level is each
+ * side's own choice (docs/protocol.md, "Compression layer"), so each takes
+ * the one that suits its CPU. The client's is free next to the target's and
+ * inflating costs the target about the same at any level, so the client
+ * keeps a good ratio. The agent, on a Pentium III, compresses at level 1:
+ * measured with tcpbench (docs/plan.md, 9g), level 1 runs about twice as
+ * fast as level 6 for 4% more output on machine code, and even so the CPU,
+ * not a 100 Mbit card, is what limits it. To be confirmed on the A21m.
+ */
 #define WL_SESSION_TCP_LEVEL 6
+#define WL_SESSION_TCP_AGENT_LEVEL 1
 
 /*
  * Builds the link a session runs over. The default, with make_link NULL, is

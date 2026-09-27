@@ -1766,6 +1766,8 @@ static struct conn *conn_new(struct agent *ag, struct wl_transport *t, int is_tc
         c->tcfg.psk = ag->tcp->psk;
         c->scfg.make_link = wl_tcplink_make;
         c->scfg.make_link_arg = &c->tcfg;
+        c->scfg.level = WL_SESSION_TCP_AGENT_LEVEL;
+        c->scfg.link.bytes_per_sec = 0; /* no line rate to pace to */
     } else {
         c->t = t;
     }
@@ -1848,6 +1850,15 @@ static wl_status conn_pump(struct conn *c, uint32_t wait_ms)
     }
     if (c->sync.active)
         service_sync(c, &c->sync);
+    /*
+     * What servicing just produced (output, credit for more input) would
+     * otherwise leave only after the loop's next wait. On serial that is
+     * noise next to the line; on TCP it is the round trip, and every 32 KiB
+     * of an upload waited out one of them. A pump that does not wait sends
+     * it now.
+     */
+    if (c->is_tcp)
+        return wl_peer_pump(c->peer, c->t, 0);
     return WL_OK;
 }
 
@@ -2016,11 +2027,13 @@ wl_status wl_agent_run(struct wl_transport *serial, const struct wl_agent_listen
          * waits on the port. Anything more waits on everything at once. */
         int alone = tcp == NULL && ag->conns != NULL && ag->conns->next == NULL;
         struct conn **link = &ag->conns;
+        int moved = 0; /* some session queued something this pass */
 
         if (tcp != NULL)
             accept_waiting(ag);
         while (*link != NULL) {
             struct conn *c = *link;
+            uint32_t queued = wl_peer_queued(c->peer);
 
             st = conn_pump(c, alone ? LOOP_MS : 0);
             if (st != WL_OK && c->is_tcp) {
@@ -2032,12 +2045,17 @@ wl_status wl_agent_run(struct wl_transport *serial, const struct wl_agent_listen
             }
             if (st != WL_OK)
                 break;
+            if (wl_peer_queued(c->peer) != queued)
+                moved = 1;
             link = &c->next;
         }
         if (st != WL_OK)
             break;
         reap(ag);
-        if (!alone)
+        /* A pass that queued anything (a download, command output) goes
+         * round again at once: there may be room for more, and on TCP a
+         * wait here is added to every round trip (wl_peer_queued). */
+        if (!alone && !moved)
             wait_for_input(ag);
     }
     if (ag->stopping && st == WL_OK) {

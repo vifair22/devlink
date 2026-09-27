@@ -17,6 +17,7 @@ enum phase { PH_CONNECT, PH_OPENING, PH_RUNNING, PH_DONE, PH_FAILED };
 
 struct xfer {
     struct wl_peer *peer;
+    int pump_now; /* the last turn queued something; see wl_peer_queued */
     struct wl_file_result *out;
     enum phase phase;
     uint16_t ch;
@@ -235,7 +236,10 @@ static wl_status run(struct wl_transport *t, const struct wl_session_cfg *cfg, u
         return WL_ERR_NOMEM;
 
     while (x->phase != PH_DONE && x->phase != PH_FAILED) {
-        st = wl_peer_pump(x->peer, t, PUMP_MS);
+        uint32_t queued = wl_peer_queued(x->peer);
+
+        st = wl_peer_pump(x->peer, t, x->pump_now ? 0U : PUMP_MS);
+        x->pump_now = 0;
         if (st != WL_OK)
             break;
         if (x->phase == PH_CONNECT) {
@@ -252,6 +256,7 @@ static wl_status run(struct wl_transport *t, const struct wl_session_cfg *cfg, u
         } else if (x->phase == PH_RUNNING && x->is_put) {
             push_file(x);
         }
+        x->pump_now = wl_peer_queued(x->peer) != queued;
     }
     /* Closed whether or not the transfer worked: see the note in
      * client_exec.c. A refused or failed transfer holds a channel just as

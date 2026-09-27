@@ -25,7 +25,7 @@
 
 struct com_impl {
     HANDLE h;           /* INVALID_HANDLE_VALUE while the port is lost */
-    DWORD read_timeout; /* last value given to SetCommTimeouts; 0 after an open */
+    DWORD read_timeout; /* last value given to SetCommTimeouts, plus one; 0 after an open */
     char path[64];
     uint32_t baud;
     DWORD lost_at;       /* GetTickCount of the last failed reopen */
@@ -63,26 +63,35 @@ static int have_port(struct com_impl *c)
     return 1;
 }
 
-/* ReadIntervalTimeout = ReadTotalTimeoutMultiplier = MAXDWORD with a finite
+/*
+ * ReadIntervalTimeout = ReadTotalTimeoutMultiplier = MAXDWORD with a finite
  * constant is the documented combination for "return as soon as any byte is
- * available, or after the constant if none arrives". Setting it is a driver
- * call, so it is skipped when the timeout has not changed. */
+ * available, or after the constant if none arrives". For no wait at all the
+ * documented combination is different: an interval of MAXDWORD with both
+ * totals 0 returns at once with whatever has arrived.
+ *
+ * The difference matters. A constant of 1 ms, which is what a zero wait used
+ * to become, lasts until the next timer tick, 10 to 15 ms on Windows 2000,
+ * and an agent serving TCP beside serial reads the port with no wait on
+ * every pass: that tick capped every TCP transfer at a few hundred KB/s.
+ *
+ * Setting it is a driver call, so it is skipped when the timeout has not
+ * changed; read_timeout holds the last value plus one, 0 meaning none yet.
+ */
 static int set_read_timeout(struct com_impl *c, DWORD ms)
 {
     COMMTIMEOUTS to;
 
-    if (ms == 0)
-        ms = 1; /* 0 would mean "never time out" in this combination */
-    if (ms == c->read_timeout)
+    if (ms + 1U == c->read_timeout)
         return 1;
     to.ReadIntervalTimeout = MAXDWORD;
-    to.ReadTotalTimeoutMultiplier = MAXDWORD;
+    to.ReadTotalTimeoutMultiplier = ms == 0 ? 0 : MAXDWORD;
     to.ReadTotalTimeoutConstant = ms;
     to.WriteTotalTimeoutMultiplier = 0;
     to.WriteTotalTimeoutConstant = 0;
     if (!SetCommTimeouts(c->h, &to))
         return 0;
-    c->read_timeout = ms;
+    c->read_timeout = ms + 1U;
     return 1;
 }
 

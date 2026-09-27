@@ -98,6 +98,16 @@ size_t wl_peer_write(struct wl_peer *p, uint16_t ch, uint8_t type, const uint8_t
 wl_status wl_peer_close(struct wl_peer *p, uint16_t ch);
 
 /*
+ * Counts every record the application has queued. A loop that feeds the peer
+ * compares it before and after its turn: if anything was taken, there may be
+ * room for more at once, and the next pump should not wait. Over serial the
+ * line paces everything and the wait costs nothing; over TCP the round trip
+ * is the limit, and a pump that waited 50 ms after each queue-full of data
+ * held an upload to a quarter of what the connection could carry.
+ */
+uint32_t wl_peer_queued(const struct wl_peer *p);
+
+/*
  * Holds back this channel's flow-control credit until the application says
  * the bytes have been used, rather than granting more as soon as a record is
  * handed to the handler.

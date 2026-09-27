@@ -12,6 +12,8 @@
 
 #include "devlink/agent_tcp.h"
 #include "devlink/client_exec.h"
+#include "devlink/clock.h"
+#include "devlink/file_ops.h"
 #include "devlink/keyfile.h"
 #include "devlink/proto.h"
 #include "devlink/tcp.h"
@@ -205,6 +207,49 @@ static void test_a_client_reaches_the_agent_over_a_real_socket(void **state)
     assert_true(r.ran);
     assert_int_equal(r.exit_code, 0);
     assert_string_equal(o.text, "over a real socket\n");
+
+    /*
+     * The round trip, not the pumps' waits, is what paces a transfer over
+     * TCP. Four megabytes of one byte compress to almost nothing, so this is
+     * all round trips: when each 64 KiB of credit also waited out a 50 ms
+     * pump, it took about a second, and it takes a few tens of ms now.
+     */
+    {
+        struct wl_tcplink_cfg tcfg;
+        struct wl_session_cfg cfg;
+        struct wl_file_result fr;
+        struct wl_transport t;
+        uint8_t psk[WL_NOISE_KEYLEN];
+        char src[256];
+        char dst[256];
+        FILE *f;
+        uint32_t t0;
+
+        (void)snprintf(src, sizeof(src), "%s/big", dir);
+        (void)snprintf(dst, sizeof(dst), "%s/big.copy", dir);
+        f = fopen(src, "wb");
+        assert_non_null(f);
+        for (int i = 0; i < 4096; i++) {
+            static const char k[1024] = {'x'};
+
+            assert_int_equal(fwrite(k, 1, sizeof(k), f), sizeof(k));
+        }
+        assert_int_equal(fclose(f), 0);
+        assert_int_equal(wl_key_load(key, psk), WL_OK);
+        wl_session_cfg_init(&cfg);
+        cfg.level = WL_SESSION_TCP_LEVEL;
+        wl_tcplink_cfg_init(&tcfg);
+        tcfg.initiator = 1;
+        tcfg.psk = psk;
+        cfg.make_link = wl_tcplink_make;
+        cfg.make_link_arg = &tcfg;
+        assert_int_equal(wl_tcp_connect("127.0.0.1", a.tcp.port, 3000, &t), WL_OK);
+        t0 = wl_clock_ms();
+        assert_int_equal(wl_client_put(&t, &cfg, 77, src, dst, 1, 3000, &fr), WL_OK);
+        assert_true(fr.ok);
+        assert_true(wl_clock_since(t0) < 600U);
+        wl_transport_close(&t);
+    }
 
     /* The wrong passphrase is closed on, and the client is told what that
      * most likely means. */
