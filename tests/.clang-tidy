@@ -1,0 +1,23 @@
+# clang-tidy for the tests: the repo's checks, less four the test code is
+# allowed and the library is not. clangd and `make tidy` both read this file,
+# so an editor and the gate agree.
+#
+# - cert-env33-c, bugprone-command-processor (its newer name): system() is
+#   how a fixture builds a tree of files on disk.
+# - bugprone-implicit-widening-of-multiplication-result: an unsigned
+#   multiplication widened to size_t is ordinary when the operands are
+#   literal test sizes.
+# - rand() with a fixed seed is what makes a randomised test repeatable; a
+#   failure has to reproduce. The check has several names (CERT's C and C++
+#   aliases, and misc-/bugprone- in newer clang-tidy), and all are listed.
+InheritParentConfig: true
+Checks: >
+  -cert-env33-c,
+  -bugprone-command-processor,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -cert-msc30-c,
+  -cert-msc50-cpp,
+  -cert-msc32-c,
+  -cert-msc51-cpp,
+  -misc-predictable-rand,
+  -bugprone-random-generator-seed,

@@ -4,6 +4,14 @@
 #include <pty.h>
 #include <unistd.h>
 
+/* cmocka's assertions, and the headers cmocka.h expects before it. */
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <cmocka.h>
+
 #include "devlink/posix_fd.h"
 #include "devlink/transport.h"
 

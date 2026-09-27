@@ -64,7 +64,7 @@ static void test_exchange_both_ways(void **state)
     wl_transport_close(&s);
 }
 
-#define BIG (3U * 1024U * 1024U + 17U)
+#define BIG ((3U * 1024U * 1024U) + 17U)
 
 static uint8_t pattern(size_t i)
 {

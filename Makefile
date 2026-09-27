@@ -8,7 +8,7 @@
 # make test-junit   the same suite, with JUnit XML under build/junit/
 # make coverage     run the suite under gcov and enforce the line gate
 # make analyze      cppcheck, gcc -fanalyzer and the stack-usage check
-# make tidy         clang-tidy over the sources
+# make tidy         clang-tidy over the sources, tests and tools
 # make clean        remove build/
 #
 # Build artifacts live under build/, one subdirectory per variant, with the
@@ -461,6 +461,13 @@ tidy:
 	@echo "== Linux agent"
 	@echo $(SRC_DIR)/linux/main.c $(SRC_DIR)/posix/clock.c | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
 	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -DDEVLINK_AGENT -std=c11
+	@echo "== tests"
+	@echo $(TEST_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -I$(TEST_DIR) \
+	    -include $(TEST_DIR)/tidy_asserts.h -std=c11
+	@echo "== tools"
+	@echo tools/tcpbench.c tools/wintcp_check.c | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -std=c11
 	@if [ -z "$(WIN_TIDY_INC)" ]; then \
 	    echo "== win32: skipped, no mingw-w64 headers found (install them to lint it)"; \
 	else \

@@ -43,19 +43,6 @@ CompileFlags:
     - -D_GNU_SOURCE
 
 ---
-# Test code is allowed two things the library is not, and an editor should not
-# nag about either. system() is how a fixture builds a tree of files on disk,
-# and an unsigned multiplication widened to size_t is ordinary when the
-# operands are literal test sizes.
-If:
-  PathMatch: tests/.*
-Diagnostics:
-  ClangTidy:
-    Remove:
-      - cert-env33-c
-      - bugprone-implicit-widening-of-multiplication-result
-
----
 # Vendored upstream code (zlib, monocypher) is taken as released and not
 # changed here, so its findings are not ours to act on; `make tidy` leaves it
 # out for the same reason. Without this an editor shows some 450 of them, and

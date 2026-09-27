@@ -13,14 +13,14 @@
 #define WL_EPOCH_DELTA 116444736000000000ULL
 #define WL_FT_PER_SECOND 10000000ULL
 
-static uint64_t wl_ft_to_unix(const FILETIME *ft)
+static inline uint64_t wl_ft_to_unix(const FILETIME *ft)
 {
     uint64_t t = ((uint64_t)ft->dwHighDateTime << 32) | ft->dwLowDateTime;
 
     return t < WL_EPOCH_DELTA ? 0 : (t - WL_EPOCH_DELTA) / WL_FT_PER_SECOND;
 }
 
-static void wl_unix_to_ft(uint64_t secs, FILETIME *ft)
+static inline void wl_unix_to_ft(uint64_t secs, FILETIME *ft)
 {
     uint64_t t = (secs * WL_FT_PER_SECOND) + WL_EPOCH_DELTA;
 

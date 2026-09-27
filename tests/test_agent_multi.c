@@ -59,12 +59,14 @@ static wl_status fake_accept(void *ctx, struct wl_transport *out, char *peer, si
         fd = l->pending[0];
         memmove(l->pending, l->pending + 1, (size_t)(l->n - 1) * sizeof(int));
         l->n--;
-        ssize_t got = read(l->bell[0], &b, 1);
-        (void)got; /* the byte only wakes poll; its value is not needed */
     }
     (void)pthread_mutex_unlock(&l->mu);
     if (fd < 0)
         return WL_OK;
+    /* One bell byte per queued connection, so it is there to take; read
+     * outside the lock, since read may block. The byte only wakes poll. */
+    ssize_t got = read(l->bell[0], &b, 1);
+    (void)got;
     ++l->serial_no;
     if (l->same_host)
         (void)snprintf(peer, cap, "10.9.9.9:%u", 40000U + l->serial_no);
@@ -178,14 +180,14 @@ static int teardown(void **state)
  * ------------------------------------------------------------------------- */
 
 struct client {
-    int tcp;
     const char *cmd;
     pthread_t th;
+    size_t out_len;
+    int tcp;
     wl_status st;
+    uint32_t took_ms;
     struct wl_exec_result r;
     char out[4096];
-    size_t out_len;
-    uint32_t took_ms;
 };
 
 static void on_output(void *ctx, uint8_t stream, const uint8_t *p, size_t n)

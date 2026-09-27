@@ -64,7 +64,7 @@ static void send_event(uint8_t type, uint16_t ch, uint8_t kind, const char *text
 static void test_a_log_line_is_stamped_with_the_time_it_happened(void **state)
 {
     (void)state;
-    wl_monitor_note(mon, 1758643385ULL - 1758643385ULL % 86400ULL + 51785ULL, "exec: dir");
+    wl_monitor_note(mon, 1758643385ULL - (1758643385ULL % 86400ULL) + 51785ULL, "exec: dir");
     assert_int_equal(wl_monitor_log_lines(mon), 1);
     assert_string_equal(wl_monitor_log(mon, 0), "14:23:05 exec: dir");
     assert_null(wl_monitor_log(mon, 1));
@@ -202,7 +202,7 @@ static void test_more_work_than_rows_does_not_run_off_the_end(void **state)
 {
     (void)state;
     for (unsigned i = 0; i < WL_MON_ROWS + 8U; i++)
-        send_event(WL_EV_CHANNEL, (uint16_t)(2U + 2U * i), WL_KIND_EXEC, "c", 0, 0);
+        send_event(WL_EV_CHANNEL, (uint16_t)(2U + (2U * i)), WL_KIND_EXEC, "c", 0, 0);
     assert_int_equal(wl_monitor_rows(mon), WL_MON_ROWS);
     assert_non_null(wl_monitor_row(mon, WL_MON_ROWS - 1U));
     assert_null(wl_monitor_row(mon, WL_MON_ROWS));

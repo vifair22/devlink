@@ -58,10 +58,10 @@ static void test_roundtrip_all_types(void **state)
     size_t n;
 
     (void)state;
-    for (uint8_t type = WL_FRAME_SYNC; type <= WL_FRAME_ACK; type++) {
+    for (int type = WL_FRAME_SYNC; type <= WL_FRAME_ACK; type++) {
         size_t len = type == WL_FRAME_ACK ? 0 : sizeof(payload);
 
-        n = encode(type, 0xFFFE, payload, len, wire, sizeof(wire));
+        n = encode((uint8_t)type, 0xFFFE, payload, len, wire, sizeof(wire));
         assert_int_equal(wire[n - 1], 0);
         assert_null(memchr(wire, 0, n - 1));
         wl_frame_rx_feed(&rx, wire, n, capture_cb, &cap);

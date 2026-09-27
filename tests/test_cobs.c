@@ -71,7 +71,7 @@ static void test_full_group_boundaries(void **state)
 
     (void)state;
     for (size_t i = 0; i < sizeof(raw); i++)
-        raw[i] = (uint8_t)(i % 255 + 1);
+        raw[i] = (uint8_t)((i % 255) + 1);
 
     enc[0] = 0xFF;
     memcpy(enc + 1, raw, 254);
@@ -109,10 +109,10 @@ static void test_random_roundtrip(void **state)
         size_t n;
         size_t m;
         /* Vary the zero density so both long runs and dense zeros occur. */
-        int zero_every = 1 + rand() % 400;
+        int zero_every = 1 + (rand() % 400);
 
         for (size_t i = 0; i < len; i++)
-            raw[i] = (rand() % zero_every == 0) ? 0 : (uint8_t)(1 + rand() % 255);
+            raw[i] = (rand() % zero_every == 0) ? 0 : (uint8_t)(1 + (rand() % 255));
         assert_int_equal(wl_cobs_encode(raw, len, enc, sizeof(enc), &n), WL_OK);
         assert_true(n <= WL_COBS_MAX_ENCODED(len));
         assert_null(memchr(enc, 0, n));

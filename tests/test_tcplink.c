@@ -100,7 +100,7 @@ static void test_up_at_once_and_one_generation(void **state)
 
 static void test_stream_arrives_whole_both_ways(void **state)
 {
-    enum { TOTAL = 3 * 65536 + 123 };
+    enum { TOTAL = (3 * 65536) + 123 };
     static uint8_t src[TOTAL];
     static uint8_t dst_b[TOTAL];
     static uint8_t dst_a[TOTAL];
@@ -109,7 +109,7 @@ static void test_stream_arrives_whole_both_ways(void **state)
 
     (void)state;
     for (size_t i = 0; i < TOTAL; i++)
-        src[i] = (uint8_t)(i * 131U + (i >> 9));
+        src[i] = (uint8_t)((i * 131U) + (i >> 9));
     make_pair(&p, 0, 0);
     for (int guard = 0; guard < 10000 && (got_a < TOTAL || got_b < TOTAL); guard++) {
         sent_a += p.a.ops->send(p.a.impl, src + sent_a, TOTAL - sent_a);
@@ -269,7 +269,7 @@ static void test_handshake_brings_both_sides_up(void **state)
 
 static void test_encrypted_stream_both_ways(void **state)
 {
-    enum { TOTAL = 2 * 65536 + 99 };
+    enum { TOTAL = (2 * 65536) + 99 };
     static uint8_t src[TOTAL];
     static uint8_t dst_a[TOTAL];
     static uint8_t dst_b[TOTAL];

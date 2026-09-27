@@ -4,4 +4,4 @@
  * runs differ.
  */
 #define EXEC_OVER_TCP 1
-#include "test_exec.c"
+#include "test_exec.c" /* NOLINT(bugprone-suspicious-include): the suite compiled a second way, on purpose */

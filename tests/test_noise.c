@@ -26,9 +26,11 @@ static size_t unhex(const char *hex, uint8_t *out, size_t cap)
 
     assert_true(n <= cap);
     for (size_t i = 0; i < n; i++) {
-        unsigned v;
+        char pair[3] = {hex[2U * i], hex[(2U * i) + 1U], '\0'};
+        char *end;
+        unsigned long v = strtoul(pair, &end, 16);
 
-        assert_int_equal(sscanf(hex + (2U * i), "%2x", &v), 1);
+        assert_true(end == pair + 2);
         out[i] = (uint8_t)v;
     }
     return n;
@@ -131,7 +133,7 @@ static void test_hkdf_rfc5869(void **state)
                "9d201395faa4b61a96c8");
 
     /* RFC 5869 caps the output at 255 blocks. */
-    assert_int_equal(wl_hkdf_sha256(NULL, 0, ikm, 22, NULL, 0, okm, 255U * 32U + 1U),
+    assert_int_equal(wl_hkdf_sha256(NULL, 0, ikm, 22, NULL, 0, okm, (255U * 32U) + 1U),
                      WL_ERR_INVAL);
 }
 
@@ -437,9 +439,9 @@ static void test_any_flipped_bit_fails(void **state)
             size_t got = 0;
 
             pair(&init, &resp);
-            if (stage >= 2)
+            if (stage >= 2) {
                 handshake(init, resp);
-            else if (stage == 1) {
+            } else if (stage == 1) {
                 assert_int_equal(wl_noise_write_message(init, NULL, 0, msg, sizeof(msg), &n),
                                  WL_OK);
                 assert_int_equal(wl_noise_read_message(resp, msg, n, buf_b, BUF, &got),

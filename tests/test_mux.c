@@ -505,7 +505,7 @@ static void write_compressible(const char *path, size_t n)
     for (unsigned band = 0; done < n; band++) {
         size_t want = n - done < sizeof(run) ? n - done : sizeof(run);
 
-        memset(run, (int)(band % 3U == 0U ? 0xFF : (band % 3U == 1U ? 0x00 : 0xC0)),
+        memset(run, band % 3U == 0U ? 0xFF : (band % 3U == 1U ? 0x00 : 0xC0),
                sizeof(run));
         assert_int_equal(fwrite(run, 1, want, f), want);
         done += want;
@@ -566,7 +566,7 @@ static void test_a_transfer_over_a_slow_line_does_not_spin(void **state)
      * more than one credit window, so the client is ahead of the line and held
      * back for most of the transfer, which is the state that spun. */
     for (uint32_t i = 0, x = 12345U; i < 262144U; i++) {
-        x = x * 1103515245U + 12345U;
+        x = (x * 1103515245U) + 12345U;
         assert_int_equal(fputc((int)(x >> 16) & 0xFF, f), (int)((x >> 16) & 0xFF));
     }
     assert_int_equal(fclose(f), 0);
@@ -586,7 +586,7 @@ static void test_a_transfer_over_a_slow_line_does_not_spin(void **state)
     assert_identical(local, remote);
     assert_identical(local, back);
 
-    used = (uint32_t)((c1.tv_sec - c0.tv_sec) * 1000L + (c1.tv_nsec - c0.tv_nsec) / 1000000L);
+    used = (uint32_t)(((c1.tv_sec - c0.tv_sec) * 1000L) + ((c1.tv_nsec - c0.tv_nsec) / 1000000L));
     /* It took seconds at this pace, so a spinning relay would use nearly all
      * of that; one that waits uses a few percent. */
     assert_true(wall >= 2000U);

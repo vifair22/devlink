@@ -171,21 +171,14 @@ static int echo(uint16_t port)
     return strstr(wl_error(), "peer closed") == NULL;
 }
 
-static int send_n(const char *host, uint16_t port, size_t n)
+/* Sends n bytes a slice at a time, reading the echo as it goes, and checks
+ * it came back intact. 0 on success. */
+static int send_and_check(struct wl_transport *c, unsigned char *out, unsigned char *in,
+                          size_t n)
 {
-    struct wl_transport c = {NULL, NULL};
-    unsigned char *out = malloc(n);
-    unsigned char *in = malloc(n);
     size_t sent = 0;
     size_t recvd = 0;
-    char caps[256];
 
-    if (out == NULL || in == NULL || wl_tcp_connect(host, port, 3000, &c) != WL_OK) {
-        printf("FAIL connect: %s\n", wl_error());
-        return 1;
-    }
-    if (wl_transport_caps(&c, caps, sizeof(caps)) == WL_OK)
-        printf("%s", caps);
     for (size_t i = 0; i < n; i++)
         out[i] = pattern(i);
     /* Interleaved, a slice at a time, so the echo never backs up behind a
@@ -196,13 +189,13 @@ static int send_n(const char *host, uint16_t port, size_t n)
         if (sent < n) {
             size_t k = n - sent > 8192U ? 8192U : n - sent;
 
-            if (wl_transport_write(&c, out + sent, k) != WL_OK) {
+            if (wl_transport_write(c, out + sent, k) != WL_OK) {
                 printf("FAIL write: %s\n", wl_error());
                 return 1;
             }
             sent += k;
         }
-        if (wl_transport_read(&c, in + recvd, n - recvd, &got, 5000) != WL_OK) {
+        if (wl_transport_read(c, in + recvd, n - recvd, &got, 5000) != WL_OK) {
             printf("FAIL read: %s\n", wl_error());
             return 1;
         }
@@ -212,25 +205,67 @@ static int send_n(const char *host, uint16_t port, size_t n)
         }
         recvd += got;
     }
-    wl_transport_close(&c);
     if (memcmp(in, out, n) != 0) {
         printf("FAIL echoed bytes differ\n");
         return 1;
     }
     printf("ok   %lu bytes sent and echoed back intact\n", (unsigned long)n);
+    return 0;
+}
+
+static int send_n(const char *host, uint16_t port, size_t n)
+{
+    struct wl_transport c = {NULL, NULL};
+    unsigned char *out = malloc(n);
+    unsigned char *in = malloc(n);
+    char caps[256];
+    int rc = 1;
+
+    if (out == NULL || in == NULL) {
+        printf("FAIL out of memory for %lu bytes\n", (unsigned long)n);
+    } else if (wl_tcp_connect(host, port, 3000, &c) != WL_OK) {
+        printf("FAIL connect: %s\n", wl_error());
+    } else {
+        if (wl_transport_caps(&c, caps, sizeof(caps)) == WL_OK)
+            printf("%s", caps);
+        rc = send_and_check(&c, out, in, n);
+        wl_transport_close(&c);
+    }
     free(out);
     free(in);
-    return 0;
+    return rc;
+}
+
+/* A whole decimal number no larger than max, or -1: atoi would take "80x" as
+ * 80 and a typo as port 0. */
+static long parse_num(const char *s, unsigned long max)
+{
+    char *end;
+    unsigned long v;
+
+    if (*s < '0' || *s > '9')
+        return -1;
+    v = strtoul(s, &end, 10);
+    return *end != '\0' || v > max ? -1 : (long)v;
 }
 
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "self") == 0)
         return self_test();
-    if (argc == 3 && strcmp(argv[1], "echo") == 0)
-        return echo((uint16_t)atoi(argv[2]));
-    if (argc == 5 && strcmp(argv[1], "send") == 0)
-        return send_n(argv[2], (uint16_t)atoi(argv[3]), (size_t)atol(argv[4]));
+    if (argc == 3 && strcmp(argv[1], "echo") == 0) {
+        long port = parse_num(argv[2], 65535UL);
+
+        if (port >= 0)
+            return echo((uint16_t)port);
+    }
+    if (argc == 5 && strcmp(argv[1], "send") == 0) {
+        long port = parse_num(argv[3], 65535UL);
+        long bytes = parse_num(argv[4], 0x7FFFFFFFUL);
+
+        if (port >= 0 && bytes >= 0)
+            return send_n(argv[2], (uint16_t)port, (size_t)bytes);
+    }
     fprintf(stderr, "usage: WINTCP self | echo PORT | send HOST PORT BYTES\n");
     return 2;
 }
