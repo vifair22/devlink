@@ -15,7 +15,7 @@ is only needed once there is an agent feature to try.
 | 6 | Channels and `exec` with streamed output | done: `devlink exec` runs commands on the A21m |
 | 7 | `put` / `get` | done: files round-trip byte-exact; the agent updates itself |
 | 8 | `sync`: hash manifests, send only changed files | done: 50-file tree, no changes, syncs in 0.25 s |
-| 9 | TCP transport, encrypted, served beside serial | same features over the new NIC, several sessions at once |
+| 9 | TCP transport, encrypted, served beside serial | done on a Windows 2000 VM: 9a-9f, 9g and 9h as far as they go without the A21m; the A21m waits for its card (see "Where it stands") |
 | 10 | Windows 2000 pass | full suite against a 2000 agent, and the NT-only improvements below |
 | 11 | Local multiplexer | several commands at once from separate terminals, over one session |
 | 12 | A window instead of a console | the agent runs as a real Win32 window on the A21m, showing what it is doing now |
@@ -56,11 +56,65 @@ Steps, each committed only when the gates pass:
 | 9g | Measure and fix the PBKDF2 iteration count on the A21m; set the TCP deflate level from measured throughput | numbers recorded here; the protocol's figure made final |
 | 9h | On the A21m, once the card is fitted | the full suite over TCP, beside a serial session |
 
-Open for 9e, to decide when it is built: how the Win32 agent waits on serial
-and sockets together. `select()` covers only sockets there, and a serial
-handle cannot join it; the likely shape is one reader thread per connection
-posting to the main loop, as the pipe readers already do, but that is to be
-settled in the code, not here.
+How the Win32 agent waits on serial and sockets together, left open above,
+was settled in 9e without threads: one loop pumps every connection without
+waiting, then waits once on all the sockets with `select()`, and while a
+serial port is open that wait is capped at 10 ms so the port is polled. The
+loop already woke every 20 ms, so this costs nothing it did not.
+
+### Where it stands (2026-09-27)
+
+Steps 9a to 9f are done and committed, and 9g and 9h are as far as they can
+go without the A21m, which was out of reach and still has no network card.
+
+- **9a-9f**: as the table says. The whole EXEC suite runs twice, over serial
+  and over TCP (`test_exec_tcp`), and the agent serving serial and several
+  TCP clients at once has its own suite (`test_agent_multi`), as has the
+  TCP startup over real sockets (`test_agent_tcp`).
+- **9h on a VM instead**: the A21m's own disk image, booted in QEMU as a
+  Windows 2000 machine with a PCnet card (`tools/w2k-vm.sh`; the image
+  needed the A21m's BIOS geometry and PIIX4 south bridge to boot). Against
+  it, over TCP through QEMU's user networking with a serial session busy at
+  the same time: exec, put and get of 2 MB byte-exact, sync of a tree and a
+  second sync sending nothing, `@caps` (transport tcp, peer, local), `@dir`,
+  `@time`, two TCP commands at once, the wrong passphrase refused with the
+  explanation, and the agent updating itself over TCP. The serial session
+  finished undisturbed throughout. On the A21m itself it waits for the card.
+- **9g, measured where possible**: `tools/tcpbench.c` (make tcpbench) times
+  the two numbers. In the VM (KVM, so the host's speed, not a Pentium III):
+  the key derivation at 100000 iterations takes 291 ms in the Watcom build;
+  deflate runs level 1 about twice as fast as level 6 for 4% more output on
+  machine code. The ratio between levels does not depend on the CPU, so the
+  agent compresses at level 1 over TCP and the client at 6 (the level is each
+  side's own choice). The iteration count stays at 100000 until TCPBENCH.EXE
+  has run on the A21m: estimated from the host at two to four seconds, over
+  the protocol's "about a second", so it will probably come down.
+
+**Throughput, found in 9h.** The first uploads to the VM ran at 279 KB/s,
+and 4 MB/s even between two Linux processes. Three things, none of them the
+network:
+
+1. The client's put and sync loops waited 50 ms in the pump after every
+   queue-full of data, although they had credit to send more at once: most
+   of every upload was that wait. A loop now pumps without waiting after a
+   turn that queued something (`wl_peer_queued`), and waits as before when
+   it could queue nothing, so nothing spins.
+2. The agent's loop did the same after a pass that queued output.
+3. On Windows 2000, a serial read asked not to wait waited anyway: a 1 ms
+   comm timeout lasts until the next timer tick, 10 to 15 ms, and the agent
+   serving TCP beside serial read the port that way on every pass. The
+   documented immediate-return setting is used now, and a pump drains what
+   is already waiting (up to 64 KiB) instead of 4 KiB a pass.
+
+Between two Linux processes over 127.0.0.1, put now runs at 26 MB/s and get
+at 25 MB/s (from 4 and 7); to the Windows 2000 VM, put at 5.7 MB/s (from
+0.28) and get at 2.5 MB/s, which is about one credit window per Windows timer
+tick and is left for the real card to confirm or not.
+
+**Still to do on the A21m**, once the card is fitted: run TCPBENCH.EXE and
+fix the PBKDF2 count and the agent's level from its figures (then the
+protocol's number is final); the full suite over TCP beside serial there;
+measure throughput over the real card.
 
 ## Iteration 11: running more than one command at a time
 

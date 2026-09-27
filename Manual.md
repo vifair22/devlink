@@ -777,6 +777,20 @@ cannot go faster with the stock Windows driver. Lower speeds work if a cable
 or port is marginal: pass `--baud` to the client and the same figure to the
 agent. Both ends must agree.
 
+**Over TCP** the line stops being the limit, and a CPU takes its place. Not
+yet measured on the A21m, which has no network card yet; so far (2026-09-27):
+
+| What | Figure |
+|------|--------|
+| `put`, 8 MB random, Linux to Linux over 127.0.0.1 | 26 MB/s |
+| `get`, the same | 25 MB/s |
+| `put`, 2 MB random, to Windows 2000 in QEMU (user networking) | 5.7 MB/s |
+| `get`, the same | 2.5 MB/s |
+
+On a Pentium III, compressing is the bottleneck well before a 100 Mbit card
+is, which is why the agent compresses at level 1 over TCP and the client at
+6 (docs/plan.md, 9g, and `make tcpbench` to measure it on a machine).
+
 ## 9. Diagnosing a link
 
 Work from the bottom up. Each tool tests one layer, and each needs the agent

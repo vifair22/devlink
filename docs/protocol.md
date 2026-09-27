@@ -3,8 +3,8 @@
 Status: agreed in iteration 1; the TCP link, its encryption and serving
 several sessions at once were redesigned in iteration 9 (2026-09-27), before
 any TCP code existed, so no deployed peer speaks the earlier draft.
-Implemented so far: everything except the TCP link and its encryption
-(iterations 2-8, 11-12).
+Implemented: all of it (iterations 2-9, 11-12). The TCP link's PBKDF2
+iteration count is still to be confirmed on the target (docs/plan.md, 9g).
 
 This document is the contract between the Linux client and the Win32 agent.
 Both ends are built from the same `src/core` sources, but the agent on a
