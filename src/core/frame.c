@@ -14,7 +14,7 @@ wl_status wl_frame_encode(const struct wl_frame *f, uint8_t *out, size_t cap,
 {
     uint8_t body[WL_FRAME_MAX_BODY];
     size_t body_len;
-    size_t cobs_len;
+    size_t cobs_len = 0; /* set by wl_cobs_encode; zeroed for i586 gcc 14 with LTO */
     wl_status st;
 
     if (!type_valid(f->type))

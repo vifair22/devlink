@@ -77,6 +77,33 @@ static void fd_close(void *impl)
 /* The kernel will set whatever rate the hardware supports, so the useful
  * fact here is what the port is running at now; the FTDI at this end goes far
  * beyond anything the other end will agree to. */
+/*
+ * The rate a speed_t stands for. glibc 2.42 made speed_t the rate itself, so
+ * printing it worked on the workstation; musl, which the Linux agent is built
+ * with, keeps the old encoded constants, and the rescue image reported
+ * "current 4098" for B115200 (octal 010002). Looking the constant up works
+ * under both, since on the new glibc each B constant is its own rate.
+ */
+static unsigned long speed_to_baud(speed_t sp)
+{
+    static const struct {
+        speed_t speed;
+        unsigned long baud;
+    } table[] = {
+        {B50, 50},         {B75, 75},         {B110, 110},       {B134, 134},
+        {B150, 150},       {B200, 200},       {B300, 300},       {B600, 600},
+        {B1200, 1200},     {B1800, 1800},     {B2400, 2400},     {B4800, 4800},
+        {B9600, 9600},     {B19200, 19200},   {B38400, 38400},   {B57600, 57600},
+        {B115200, 115200}, {B230400, 230400}, {B460800, 460800}, {B921600, 921600},
+    };
+
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (table[i].speed == sp)
+            return table[i].baud;
+    }
+    return (unsigned long)sp; /* a rate outside the table: the new glibc's own */
+}
+
 static wl_status fd_caps(void *impl, char *out, size_t cap)
 {
     struct fd_impl *s = impl;
@@ -91,7 +118,7 @@ static wl_status fd_caps(void *impl, char *out, size_t cap)
                  "transport serial (posix)\n"
                  "current %lu\n"
                  "settable any rate the kernel and the hardware agree on\n",
-                 (unsigned long)sp);
+                 speed_to_baud(sp));
     if (n < 0 || (size_t)n >= cap)
         return wl_fail(WL_ERR_NOSPACE, "caps: buffer too small");
     return WL_OK;

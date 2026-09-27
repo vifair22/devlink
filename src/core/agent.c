@@ -822,9 +822,11 @@ static void open_put(struct conn *c, uint16_t ch, const uint8_t *args, size_t n)
     uint64_t size;
     uint64_t mtime;
     uint8_t flags;
-    uint64_t have_size;
-    uint64_t have_mtime;
-    int is_dir;
+    /* Read only after wl_fs_stat has filled them; zeroed because i586 gcc
+     * 14 with LTO cannot see that and fails the build on it. */
+    uint64_t have_size = 0;
+    uint64_t have_mtime = 0;
+    int is_dir = 0;
 
     wl_rbuf_init(&r, args, n);
     path = wl_r_str(&r, &path_n);
@@ -875,7 +877,7 @@ static void open_get(struct conn *c, uint16_t ch, const uint8_t *args, size_t n)
     size_t path_n;
     struct xfer *x;
     uint8_t meta[16];
-    int is_dir;
+    int is_dir = 0; /* set by wl_fs_stat; zeroed for i586 gcc 14 with LTO */
 
     wl_rbuf_init(&r, args, n);
     path = wl_r_str(&r, &path_n);
@@ -999,9 +1001,10 @@ static void sync_entry(struct conn *c, struct sync *y, const char *rel, uint64_t
                        uint64_t mtime, const uint8_t *hash)
 {
     char full[WL_PATH_MAX];
-    uint64_t have_size;
-    uint64_t have_mtime;
-    int is_dir;
+    /* Set by wl_fs_stat; zeroed for i586 gcc 14 with LTO, as above. */
+    uint64_t have_size = 0;
+    uint64_t have_mtime = 0;
+    int is_dir = 0;
 
     sync_remember(y, rel);
     if (!wl_fs_join(full, sizeof(full), y->root, rel)) {
