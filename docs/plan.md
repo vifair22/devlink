@@ -16,9 +16,9 @@ is only needed once there is an agent feature to try.
 | 7 | `put` / `get` | done: files round-trip byte-exact; the agent updates itself |
 | 8 | `sync`: hash manifests, send only changed files | done: 50-file tree, no changes, syncs in 0.25 s |
 | 9 | TCP transport, encrypted, served beside serial | done: 9a-9h, tested on a Windows 2000 VM of the A21m's disk and measured on an emulated Pentium III (see "Where it stands") |
-| 10 | Windows 2000 pass | full suite against a 2000 agent, and the NT-only improvements below |
-| 11 | Local multiplexer | several commands at once from separate terminals, over one session |
-| 12 | A window instead of a console | the agent runs as a real Win32 window on the A21m, showing what it is doing now |
+| 10 | Windows 2000 pass | done: the NT-only improvements below are settled (`9e95186`), and the agent has run on 2000 since 2026-09-23 |
+| 11 | Local multiplexer | done: `devlink mux` (`5a7abc9`); several terminals share one session, in daily use |
+| 12 | A window instead of a console | done: DEVLINKW.EXE (`68262bb`) runs on the A21m and replaces itself on `@stop` |
 
 ## Iteration 9: TCP, encrypted, beside serial
 
@@ -121,6 +121,11 @@ Between two Linux processes over 127.0.0.1, put now runs at 26 MB/s and get
 at 25 MB/s (from 4 and 7); to the Windows 2000 VM, put at 5.7 MB/s (from
 0.28) and get at 2.5 MB/s, which is about one credit window per Windows timer
 tick and is left for the real card to confirm or not.
+
+**Deployed 2026-09-27**: build 0920 runs on the A21m as DEVLINKW.EXE, with
+the client at the same build. Over serial, exec (with exit status), a 256 KB
+random put and get byte-exact at the line's 11 KB/s, and a sync that sent 10
+files and then nothing. No `DEVLINK.KEY` yet, so TCP is off there.
 
 **Worth doing on the A21m** once the card is fitted, as a check rather than
 a step: TCPBENCH.EXE there should agree with the emulated figures above; the
