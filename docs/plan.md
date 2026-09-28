@@ -127,10 +127,27 @@ the client at the same build. Over serial, exec (with exit status), a 256 KB
 random put and get byte-exact at the line's 11 KB/s, and a sync that sent 10
 files and then nothing. No `DEVLINK.KEY` yet, so TCP is off there.
 
-**Worth doing on the A21m** once the card is fitted, as a check rather than
-a step: TCPBENCH.EXE there should agree with the emulated figures above; the
-suite over TCP beside serial on the real machine; throughput over the real
-card.
+**Measured on the A21m, 2026-09-28**, with the network card fitted (Intel
+PRO/100 SP Mobile Combo, 82559, 100 Mbit, e100bnt5.sys 5.41.44) and the CPU
+at its 548 MHz SpeedStep low speed. The emulation was cautious by two to five
+times:
+
+| | emulated (above) | the A21m |
+|---|---|---|
+| PBKDF2, 10000 iterations, Watcom build | about 1.1 s | 0.22 to 0.31 s |
+| deflate level 1 | 2.3 MB/s | 4.6 MB/s |
+| deflate level 6 | 1.0 MB/s | 2.3 MB/s |
+| deflate level 9 | 0.4 MB/s | 0.8 MB/s |
+| put, 8 MB random, over TCP | 5.7 MB/s (to the VM) | 3.0 MB/s |
+| get, 8 MB random, over TCP | 2.5 MB/s (from the VM) | 1.56 MB/s |
+
+Deflate was measured over shell32.dll (2.3 MB, 38 to 41% at every level);
+TCPBENCH over its own 205 KB image is too short for the 10 to 15 ms timer.
+Transfers were byte-exact both ways, and a serial exec answered in the middle
+of a TCP get without slowing it. Serial moves the same data at 11 KB/s, so
+TCP is about 270 times faster up and 140 times down. Nothing in the protocol
+changes: the iteration count now costs the agent about a quarter of a second
+at startup, and level 1 still keeps ahead of what the card is fed.
 
 ## Iteration 11: running more than one command at a time
 
