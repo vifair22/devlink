@@ -49,6 +49,7 @@ struct wl_tui_info {
     unsigned tcp_on;     /* nonzero when TCP is listening */
     const char *net;     /* "eth0 10.0.2.15", or "no network" */
     const char *memory;  /* "480 MB free" */
+    const char *cpu;     /* "cpu 12%  load 0.21": how busy the machine is */
     const char *clock;   /* "21:40:07" */
     uint32_t now_ms;     /* wl_clock_ms, for how long work has run */
 };

@@ -217,6 +217,60 @@ static void memory_text(char *out, size_t cap)
     (void)fclose(f);
 }
 
+/* How busy the machine is: CPU use since the last call, from the first line
+ * of /proc/stat (every CPU summed), and the one-minute load average. The
+ * first call has nothing to compare with and gives the load alone. */
+static void cpu_text(char *out, size_t cap)
+{
+    static unsigned long long last_busy;
+    static unsigned long long last_total;
+    unsigned long long f[8] = {0};
+    unsigned long long busy;
+    unsigned long long total = 0;
+    char line[256];
+    char load[16] = "";
+    FILE *st = fopen("/proc/stat", "r");
+    FILE *la = fopen("/proc/loadavg", "r");
+    int have = 0;
+
+    out[0] = '\0';
+    if (st != NULL) {
+        if (fgets(line, sizeof(line), st) != NULL && strncmp(line, "cpu ", 4) == 0) {
+            char *p = line + 4;
+
+            /* user nice system idle iowait irq softirq steal */
+            for (unsigned i = 0; i < 8U; i++) {
+                char *end;
+
+                f[i] = strtoull(p, &end, 10);
+                if (end == p)
+                    break;
+                p = end;
+                total += f[i];
+            }
+            have = 1;
+        }
+        (void)fclose(st);
+    }
+    if (la != NULL) {
+        if (fgets(line, sizeof(line), la) != NULL)
+            (void)sscanf(line, "%15s", load); /* NOLINT(cert-err34-c): a string, no conversion */
+        (void)fclose(la);
+    }
+    busy = total - f[3] - f[4];
+    if (have && last_total != 0ULL && total > last_total) {
+        unsigned long long pct = (busy - last_busy) * 100ULL / (total - last_total);
+
+        (void)snprintf(out, cap, "cpu %llu%%  load %s", pct, load);
+    } else if (load[0] != '\0') {
+        (void)snprintf(out, cap, "load %s", load);
+    }
+    if (have) {
+        last_busy = busy;
+        last_total = total;
+    }
+}
+
 static void clock_text(char *out, size_t cap)
 {
     time_t now = time(NULL);
@@ -251,8 +305,10 @@ static wl_status serve_tui(struct wl_transport *serial, const struct wl_agent_li
     pthread_t th;
     char net[96] = "";
     char memory[32] = "";
+    char cpu[48] = "";
     char clock[16] = "";
     uint32_t net_at = 0;
+    uint32_t cpu_at = 0;
     int full = 1;
     int done = 0;
 
@@ -284,6 +340,12 @@ static wl_status serve_tui(struct wl_transport *serial, const struct wl_agent_li
             net_at = wl_clock_ms();
         }
         memory_text(memory, sizeof(memory));
+        /* Measured over about a second: over a single 250 ms tick the
+         * figure jumps about too much to read. */
+        if (cpu[0] == '\0' || wl_clock_since(cpu_at) >= 1000U) {
+            cpu_text(cpu, sizeof(cpu));
+            cpu_at = wl_clock_ms();
+        }
         clock_text(clock, sizeof(clock));
         memset(&info, 0, sizeof(info));
         info.version = wl_version();
@@ -292,6 +354,7 @@ static wl_status serve_tui(struct wl_transport *serial, const struct wl_agent_li
         info.tcp_on = tcp_on;
         info.net = net;
         info.memory = memory;
+        info.cpu = cpu;
         info.clock = clock;
         info.now_ms = wl_clock_ms();
         wl_term_size(&w, &h);

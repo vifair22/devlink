@@ -178,10 +178,8 @@ static void title_bar(const struct wl_tui_info *info, struct wl_tui_grid *g)
 static void status_lines(const struct wl_monitor *m, const struct wl_tui_info *info,
                          struct wl_tui_grid *g)
 {
-    struct wl_mon_totals tot;
     unsigned clients = wl_monitor_tcp_clients(m);
     char who[WL_MON_SESSION_MAX + 16];
-    char bytes[32];
     char buf[WL_TUI_MAX_W + 1];
     unsigned col;
 
@@ -228,11 +226,8 @@ static void status_lines(const struct wl_monitor *m, const struct wl_tui_info *i
         col = put(g, 3, col, "memory ", WL_TUI_BOLD);
         col = put(g, 3, col, info->memory, WL_TUI_NORMAL) + 3U;
     }
-    wl_monitor_totals(m, &tot);
-    wl_mon_bytes(tot.bytes, bytes, sizeof(bytes));
-    (void)snprintf(buf, sizeof(buf), "%lu command(s), %lu transfer(s), %s moved",
-                   (unsigned long)tot.commands, (unsigned long)tot.transfers, bytes);
-    (void)put(g, 3, col, buf, WL_TUI_NORMAL);
+    if (has(info->cpu))
+        (void)put(g, 3, col, info->cpu, WL_TUI_NORMAL);
 }
 
 /* One piece of work: what, whose, on what, then its progress and age at the
@@ -265,12 +260,22 @@ static void work_row(const struct wl_mon_row *r, uint32_t now_ms, struct wl_tui_
 static void work_pane(const struct wl_monitor *m, uint32_t now_ms, struct wl_tui_grid *g,
                       unsigned top, unsigned height)
 {
+    struct wl_mon_totals tot;
     unsigned n = wl_monitor_rows(m);
     unsigned shown = n <= height ? n : height - 1U;
-    char buf[48];
+    char bytes[32];
+    char buf[96];
 
     (void)snprintf(buf, sizeof(buf), n == 0U ? "work" : "work (%u)", n);
     rule(g, top, buf);
+    /* Everything done since the agent started, at the rule's right end,
+     * beside the work it counts. */
+    wl_monitor_totals(m, &tot);
+    wl_mon_bytes(tot.bytes, bytes, sizeof(bytes));
+    (void)snprintf(buf, sizeof(buf), " %lu command(s), %lu transfer(s), %s moved --",
+                   (unsigned long)tot.commands, (unsigned long)tot.transfers, bytes);
+    if (strlen(buf) + 16U < g->w)
+        put_right(g, top, buf, WL_TUI_NORMAL);
     if (n == 0U) {
         fill(g, top + 1U, WL_TUI_NORMAL);
         (void)put(g, top + 1U, 1, "nothing running", WL_TUI_NORMAL);

@@ -40,6 +40,7 @@ static int setup(void **state)
     info.tcp_on = 1;
     info.net = "eth0 10.0.2.15";
     info.memory = "480 MB free";
+    info.cpu = "cpu 12%  load 0.21";
     info.clock = "21:40:07";
     /* The monitor stamps work with wl_clock_ms, so the ages are measured
      * against the same clock. */
@@ -127,7 +128,9 @@ static void test_an_idle_agent_fills_an_80_by_25_screen(void **state)
     assert_non_null(strstr(row(2), "port 2098: no clients"));
     assert_non_null(strstr(row(2), "eth0 10.0.2.15"));
     assert_non_null(strstr(row(3), "480 MB free"));
-    assert_non_null(strstr(row(3), "0 command(s), 0 transfer(s), 0 B moved"));
+    assert_non_null(strstr(row(3), "cpu 12%  load 0.21"));
+    assert_null(strstr(row(3), "command(s)"));
+    assert_non_null(strstr(row(4), "0 command(s), 0 transfer(s), 0 B moved --"));
     assert_int_equal(find("-- work "), 4);
     assert_int_equal(find("nothing running"), 5);
     assert_int_equal(find("-- log "), 6);

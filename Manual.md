@@ -302,14 +302,18 @@ log file, the test suite) it says so and logs lines as before.
  devlink agent 0.1.0_20260928.0335.linux                            21:40:07
  serial /dev/ttyS0 at 115200: serving 0.1.0_20260928.0100.release
  TCP port 2098: no clients   net eth0 10.0.2.15
- memory 480 MB free   12 command(s), 3 transfer(s), 1.2 MB moved
- -- work (1) -----------------------------------------------------------------
+ memory 480 MB free   cpu 12%  load 0.21
+ -- work (1) ----------------------- 12 command(s), 3 transfer(s), 1.2 MB moved --
  receiving serial          /tmp/DEVLINK.EFI  4.0 MB of 10.0 MB (40%)     12s
  -- log ----------------------------------------------------------------------
  21:39:58 session: new client
  ...
  Up/Down PgUp/PgDn scroll  End follow  r restart  P power off  B reboot  ? help
 ```
+
+CPU use is measured over the last second from `/proc/stat`, all CPUs
+together, beside the one-minute load average; the totals on the work rule
+count everything since the agent started.
 
 | Key | Does |
 |---|---|
