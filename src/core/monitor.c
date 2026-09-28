@@ -299,3 +299,69 @@ void wl_monitor_totals(const struct wl_monitor *m, struct wl_mon_totals *out)
 {
     *out = m->tot;
 }
+
+void wl_mon_bytes(uint64_t bytes, char *out, size_t cap)
+{
+    static const char *const unit[] = {"B", "KB", "MB", "GB"};
+    unsigned u = 0;
+    uint64_t whole = bytes;
+    uint64_t tenth = 0;
+
+    while (whole >= 1024U && u < 3U) {
+        tenth = ((whole % 1024U) * 10U) / 1024U;
+        whole /= 1024U;
+        u++;
+    }
+    if (u == 0)
+        (void)snprintf(out, cap, "%lu B", (unsigned long)whole);
+    else
+        (void)snprintf(out, cap, "%lu.%lu %s", (unsigned long)whole, (unsigned long)tenth,
+                       unit[u]);
+}
+
+const char *wl_mon_kind_name(uint8_t kind)
+{
+    switch (kind) {
+    case WL_KIND_EXEC:
+        return "command";
+    case WL_KIND_PUT:
+        return "receiving";
+    case WL_KIND_GET:
+        return "sending";
+    case WL_KIND_SYNC:
+        return "sync";
+    default:
+        return "?";
+    }
+}
+
+void wl_mon_progress(const struct wl_mon_row *r, char *out, size_t cap)
+{
+    char a[32];
+    char b[32];
+
+    wl_mon_bytes(r->done, a, sizeof(a));
+    if (r->kind == WL_KIND_EXEC) {
+        /* A command has no size to work towards, so there is no percentage
+         * to reach. What it has sent back is worth showing, but it is not
+         * progress: a command that prints nothing sits at zero for its whole
+         * run, and a bare "0 B" there reads like a stall. */
+        (void)snprintf(out, cap, "Running (%s out)", a);
+    } else if (r->total == 0) {
+        (void)snprintf(out, cap, "%s", a);
+    } else {
+        wl_mon_bytes(r->total, b, sizeof(b));
+        (void)snprintf(out, cap, "%s of %s (%lu%%)", a, b,
+                       (unsigned long)(r->done * 100U / r->total));
+    }
+}
+
+void wl_mon_elapsed(uint32_t ms, char *out, size_t cap)
+{
+    unsigned long secs = (unsigned long)(ms / 1000U);
+
+    if (secs < 60UL)
+        (void)snprintf(out, cap, "%lus", secs);
+    else
+        (void)snprintf(out, cap, "%lum %02lus", secs / 60UL, secs % 60UL);
+}

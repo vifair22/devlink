@@ -1,9 +1,15 @@
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <limits.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/utsname.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -12,9 +18,12 @@
 #include "devlink/clock.h"
 #include "devlink/echo.h"
 #include "devlink/linktest.h"
+#include "devlink/monitor.h"
 #include "devlink/proto.h"
 #include "devlink/transport.h"
+#include "devlink/tui.h"
 #include "devlink/version.h"
+#include "tui_term.h"
 
 /*
  * The Linux agent: the same agent as DEVLINK.EXE over the POSIX platform
@@ -25,13 +34,15 @@
 
 static const char *const help =
     "usage: devlink-agent --version\n"
-    "       devlink-agent serve [PORT] [BAUD] [TCPPORT]\n"
+    "       devlink-agent serve [--tui] [PORT] [BAUD] [TCPPORT]\n"
     "       devlink-agent echo [PORT] [BAUD] [IDLE_SECONDS]\n"
     "       devlink-agent linktest [PORT] [BAUD] [WAIT_SECONDS]\n"
     "\n"
     "serve  the agent proper: serve devlink clients until stopped.\n"
     "       Defaults: /dev/ttyS0 115200 2098. PORT none serves TCP alone. TCP\n"
     "       is on only when DEVLINK.KEY beside this program holds a passphrase.\n"
+    "       --tui draws a status screen on this terminal instead of a line\n"
+    "       per event, with keys to scroll the log, restart, power off, reboot.\n"
     "echo   serve 'devlink echo': echo every frame back.\n"
     "       Defaults: /dev/ttyS0 115200 60. Returns when the probe finishes or\n"
     "       after IDLE_SECONDS without a frame.\n"
@@ -95,18 +106,257 @@ static int key_path(char *out, size_t cap)
            (int)(cap - (size_t)(slash - out));
 }
 
+/* ---------------------------------------------------------------------------
+ * serve --tui: the status screen
+ *
+ * The agent loop runs untouched on a thread and reports through the same
+ * callbacks as ever; wl_monitor (core, tested) holds the state and
+ * wl_tui_render (core, tested) lays it out. What is left here is the thread,
+ * the lock the monitor asks its owner for, the facts about the machine, and
+ * running poweroff or reboot when asked.
+ * ------------------------------------------------------------------------- */
+
+struct tui_run {
+    struct wl_transport *serial;
+    const struct wl_agent_listener *tcp;
+    const struct wl_agent_cfg *cfg;
+    uint32_t seed;
+    wl_status result;
+    int done;
+};
+
+static pthread_mutex_t mon_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct wl_monitor *mon;
+/* 32 KB: static, as the project keeps to a 64 KB stack. */
+static struct wl_tui_grid grid;
+
+static void tui_log(void *ctx, const char *msg)
+{
+    uint64_t utc = 0;
+
+    (void)ctx;
+    (void)wl_clock_utc(&utc);
+    (void)pthread_mutex_lock(&mon_lock);
+    wl_monitor_note(mon, utc + (uint64_t)((int64_t)wl_clock_local_offset_minutes() * 60), msg);
+    (void)pthread_mutex_unlock(&mon_lock);
+}
+
+static void tui_event(void *ctx, const struct wl_agent_event *e)
+{
+    (void)ctx;
+    (void)pthread_mutex_lock(&mon_lock);
+    wl_monitor_event(mon, e);
+    (void)pthread_mutex_unlock(&mon_lock);
+}
+
+static void *agent_thread(void *arg)
+{
+    struct tui_run *r = arg;
+    wl_status s = wl_agent_run(r->serial, r->tcp, r->cfg, r->seed);
+
+    (void)pthread_mutex_lock(&mon_lock);
+    r->result = s;
+    r->done = 1;
+    (void)pthread_mutex_unlock(&mon_lock);
+    return NULL;
+}
+
+/* The first IPv4 address on an interface that is up and not loopback, and
+ * how many more there are: what a person at the machine needs to reach it. */
+static void net_text(char *out, size_t cap)
+{
+    struct ifaddrs *all;
+    unsigned more = 0;
+
+    (void)snprintf(out, cap, "no network");
+    if (getifaddrs(&all) != 0)
+        return;
+    for (const struct ifaddrs *a = all; a != NULL; a = a->ifa_next) {
+        char ip[INET_ADDRSTRLEN];
+        struct sockaddr_in in;
+
+        if (a->ifa_addr == NULL || a->ifa_addr->sa_family != AF_INET ||
+            (a->ifa_flags & IFF_LOOPBACK) != 0U || (a->ifa_flags & IFF_UP) == 0U)
+            continue;
+        /* Copied out rather than cast: the sockaddr is only as aligned as the
+         * generic one. */
+        memcpy(&in, a->ifa_addr, sizeof(in));
+        if (more++ == 0U && inet_ntop(AF_INET, &in.sin_addr, ip, sizeof(ip)) != NULL)
+            (void)snprintf(out, cap, "%s %s", a->ifa_name, ip);
+    }
+    freeifaddrs(all);
+    if (more > 1U) {
+        size_t n = strlen(out);
+
+        (void)snprintf(out + n, cap - n, " (+%u)", more - 1U);
+    }
+}
+
+/* MemAvailable from /proc/meminfo, the kernel's own estimate of what a new
+ * program could have. */
+static void memory_text(char *out, size_t cap)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    char line[128];
+
+    out[0] = '\0';
+    if (f == NULL)
+        return;
+    while (fgets(line, sizeof(line), f) != NULL) {
+        static const char key[] = "MemAvailable:";
+        char *end;
+        unsigned long kb;
+
+        if (strncmp(line, key, sizeof(key) - 1U) != 0)
+            continue;
+        kb = strtoul(line + sizeof(key) - 1U, &end, 10);
+        if (end != line + sizeof(key) - 1U)
+            (void)snprintf(out, cap, "%lu MB free", kb / 1024UL);
+        break;
+    }
+    (void)fclose(f);
+}
+
+static void clock_text(char *out, size_t cap)
+{
+    time_t now = time(NULL);
+    struct tm t;
+
+    if (localtime_r(&now, &t) != NULL)
+        (void)snprintf(out, cap, "%02d:%02d:%02d", t.tm_hour, t.tm_min, t.tm_sec);
+    else
+        out[0] = '\0';
+}
+
+/* poweroff and reboot are busybox's: they signal init, which runs the
+ * shutdown actions in inittab and then stops every process, this one too. */
+static void run_detached(const char *what)
+{
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        (void)execlp(what, what, (char *)NULL);
+        _exit(127);
+    }
+}
+
+/* Serves with the screen up; returns what the agent loop returned. */
+static wl_status serve_tui(struct wl_transport *serial, const struct wl_agent_listener *tcp,
+                           struct wl_agent_cfg *cfg, const char *serial_text,
+                           const char *tcp_text, unsigned tcp_on)
+{
+    struct tui_run run;
+    struct wl_tui_view view;
+    struct wl_tui_info info;
+    pthread_t th;
+    char net[96] = "";
+    char memory[32] = "";
+    char clock[16] = "";
+    uint32_t net_at = 0;
+    int full = 1;
+    int done = 0;
+
+    mon = wl_monitor_new();
+    if (mon == NULL)
+        return wl_fail(WL_ERR_NOMEM, "no memory for the status screen");
+    cfg->log = tui_log;
+    cfg->event = tui_event;
+    memset(&run, 0, sizeof(run));
+    run.serial = serial;
+    run.tcp = tcp;
+    run.cfg = cfg;
+    run.seed = seed();
+    wl_tui_view_init(&view);
+    tui_log(NULL, "devlink agent started; ? for the keys");
+    if (pthread_create(&th, NULL, agent_thread, &run) != 0) {
+        wl_monitor_free(mon);
+        return wl_fail(WL_ERR_IO, "cannot start the agent thread");
+    }
+    while (!done) {
+        unsigned w;
+        unsigned h;
+        int key;
+
+        /* The addresses change rarely and cost a netlink walk; memory and
+         * the clock are cheap. */
+        if (net[0] == '\0' || wl_clock_since(net_at) >= 5000U) {
+            net_text(net, sizeof(net));
+            net_at = wl_clock_ms();
+        }
+        memory_text(memory, sizeof(memory));
+        clock_text(clock, sizeof(clock));
+        memset(&info, 0, sizeof(info));
+        info.version = wl_version();
+        info.serial = serial_text;
+        info.tcp = tcp_text;
+        info.tcp_on = tcp_on;
+        info.net = net;
+        info.memory = memory;
+        info.clock = clock;
+        info.now_ms = wl_clock_ms();
+        wl_term_size(&w, &h);
+        (void)pthread_mutex_lock(&mon_lock);
+        wl_tui_render(mon, &info, &view, &grid, w, h);
+        done = run.done;
+        (void)pthread_mutex_unlock(&mon_lock);
+        wl_term_draw(&grid, full);
+        full = 0;
+        if (stop_requested)
+            break;
+        key = wl_term_key(250U);
+        if (key < 0)
+            continue;
+        switch (wl_tui_key(&view, key)) {
+        case WL_TUI_REDRAW:
+            full = 1;
+            break;
+        case WL_TUI_RESTART:
+            tui_log(NULL, "restart asked for at the keyboard");
+            stop_requested = 1;
+            break;
+        case WL_TUI_POWEROFF:
+            tui_log(NULL, "power off asked for at the keyboard");
+            run_detached("poweroff");
+            break;
+        case WL_TUI_REBOOT:
+            tui_log(NULL, "reboot asked for at the keyboard");
+            run_detached("reboot");
+            break;
+        default:
+            break;
+        }
+    }
+    stop_requested = 1;
+    (void)pthread_join(th, NULL);
+    wl_term_close();
+    wl_monitor_free(mon);
+    mon = NULL;
+    return run.result;
+}
+
 static int cmd_serve(int argc, char **argv)
 {
-    const char *port = argc > 0 ? argv[0] : default_port;
-    unsigned long baud = argc > 1 ? strtoul(argv[1], NULL, 10) : 115200UL;
-    unsigned long tcp_port = argc > 2 ? strtoul(argv[2], NULL, 10) : WL_TCP_DEFAULT_PORT;
-    int serial = strcmp(port, "none") != 0;
+    int tui = argc > 0 && strcmp(argv[0], "--tui") == 0;
+    const char *port;
+    unsigned long baud;
+    unsigned long tcp_port;
+    int serial;
     struct wl_agent_cfg cfg;
     struct wl_agent_tcp tcp;
     struct wl_transport t;
     char key[PATH_MAX];
+    char serial_text[PATH_MAX + 32];
+    char tcp_text[64];
     wl_status s;
 
+    if (tui) {
+        argc--;
+        argv++;
+    }
+    port = argc > 0 ? argv[0] : default_port;
+    baud = argc > 1 ? strtoul(argv[1], NULL, 10) : 115200UL;
+    tcp_port = argc > 2 ? strtoul(argv[2], NULL, 10) : WL_TCP_DEFAULT_PORT;
+    serial = strcmp(port, "none") != 0;
     if (argc > 3 || baud == 0 || tcp_port == 0 || tcp_port > 65535UL) {
         fputs(help, stderr);
         return 1;
@@ -132,6 +382,21 @@ static int cmd_serve(int argc, char **argv)
         return 1;
     }
     if (serial)
+        (void)snprintf(serial_text, sizeof(serial_text), "%s at %lu", port, baud);
+    else
+        (void)snprintf(serial_text, sizeof(serial_text), "none");
+    if (tcp.l != NULL)
+        (void)snprintf(tcp_text, sizeof(tcp_text), "port %u", (unsigned)tcp.port);
+    else
+        (void)snprintf(tcp_text, sizeof(tcp_text), "no DEVLINK.KEY");
+    if (tui && wl_term_open(STDIN_FILENO)) {
+        s = serve_tui(serial ? &t : NULL, tcp.l != NULL ? &tcp.listener : NULL, &cfg,
+                      serial_text, tcp_text, tcp.l != NULL);
+        goto served;
+    }
+    if (tui)
+        printf("devlink-agent: --tui needs a terminal; logging lines instead\n");
+    if (serial)
         printf("devlink agent %s serving on %s at %lu\n", wl_version(), port, baud);
     else
         printf("devlink agent %s, no serial port\n", wl_version());
@@ -142,6 +407,7 @@ static int cmd_serve(int argc, char **argv)
         printf("TCP: off (no %s)\n", key);
     fflush(stdout);
     s = wl_agent_run(serial ? &t : NULL, tcp.l != NULL ? &tcp.listener : NULL, &cfg, seed());
+served:
     if (serial)
         wl_transport_close(&t);
     wl_agent_tcp_close(&tcp);

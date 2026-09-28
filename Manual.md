@@ -261,7 +261,7 @@ separate programs rather than one.
 ### The Linux agent
 
 ```
-devlink-agent serve [PORT] [BAUD] [TCPPORT]   defaults: /dev/ttyS0 115200 2098
+devlink-agent serve [--tui] [PORT] [BAUD] [TCPPORT]   defaults: /dev/ttyS0 115200 2098
 devlink-agent echo [PORT] [BAUD] [IDLE_SECONDS]
 devlink-agent linktest [PORT] [BAUD] [WAIT_SECONDS]
 devlink-agent --version
@@ -290,6 +290,48 @@ It is meant to run under init, which restarts it when it exits. That makes
 `@stop` the whole update procedure: `put` the new binary over the old one
 (Linux lets a running binary be renamed over), then `@stop`, and init starts
 the new one. SIGTERM and SIGINT end the serve loop cleanly.
+
+#### The status screen: `serve --tui`
+
+With `--tui`, and a terminal on standard input, the agent draws a status
+screen there instead of printing a line per event. devlink-rescue runs it this
+way on `tty1`, the console the machine boots to. Without a terminal (a pipe, a
+log file, the test suite) it says so and logs lines as before.
+
+```
+ devlink agent 0.1.0_20260928.0335.linux                            21:40:07
+ serial /dev/ttyS0 at 115200: serving 0.1.0_20260928.0100.release
+ TCP port 2098: no clients   net eth0 10.0.2.15
+ memory 480 MB free   12 command(s), 3 transfer(s), 1.2 MB moved
+ -- work (1) -----------------------------------------------------------------
+ receiving serial          /tmp/DEVLINK.EFI  4.0 MB of 10.0 MB (40%)     12s
+ -- log ----------------------------------------------------------------------
+ 21:39:58 session: new client
+ ...
+ Up/Down PgUp/PgDn scroll  End follow  r restart  P power off  B reboot  ? help
+```
+
+| Key | Does |
+|---|---|
+| Up, Down, PgUp, PgDn | scroll the log; while scrolled back, new lines do not move the view |
+| Home, End | the oldest line held; the newest, following from there |
+| `r` | restart the agent: it exits and init starts it again (sessions end) |
+| `P` | power the machine off (busybox `poweroff`, through init) |
+| `B` | reboot the machine |
+| Ctrl-L | redraw every cell, after something else wrote to the console |
+| `?` | the keys; any key closes it, and does nothing else |
+
+`r`, `P` and `B` ask first, in the bar at the bottom: `y` goes on, any other
+key leaves it. `P` and `B` are upper case only, so a stray key does not ask.
+The power-off key is also the way to switch off a machine whose power button
+reaches no OS, as on the A21m.
+
+What the screen says is decided in the core (`src/core/tui.c`), from the same
+`wl_monitor` the Windows window draws, and tested there (`tests/test_tui.c`);
+the terminal side (`src/linux/tui_term.c`) only draws rows that changed and
+decodes keys. The agent loop runs on a thread beside the screen. The screen
+works from 20x8 and uses up to 200x80. The kernel writing to the same console
+(`console=tty0`) can scribble over it; Ctrl-L repaints.
 
 Two things differ from the Windows agent, both in the POSIX layer and so also
 true of the agent the test suite runs:

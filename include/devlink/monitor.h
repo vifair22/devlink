@@ -127,4 +127,23 @@ const char *wl_monitor_log(const struct wl_monitor *m, unsigned i);
 
 void wl_monitor_totals(const struct wl_monitor *m, struct wl_mon_totals *out);
 
+/*
+ * Formatting shared by every display, so the window and the text screen say
+ * the same thing about the same row.
+ */
+
+/* "512 B", "4.1 MB": binary units, one decimal, as far as GB. */
+void wl_mon_bytes(uint64_t bytes, char *out, size_t cap);
+
+/* "command", "receiving", "sending", "sync"; "?" for anything else. */
+const char *wl_mon_kind_name(uint8_t kind);
+
+/* A row's progress: "4.1 MB of 10.6 MB (38%)", a bare count when the size is
+ * not known, and "Running (1.2 KB out)" for a command, which has no size to
+ * work towards. */
+void wl_mon_progress(const struct wl_mon_row *r, char *out, size_t cap);
+
+/* "42s", "3m 07s". */
+void wl_mon_elapsed(uint32_t ms, char *out, size_t cap);
+
 #endif

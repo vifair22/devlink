@@ -275,50 +275,12 @@ static void stop_serving(void)
 /* Integer-only, because the whole project avoids floating point on a machine
  * whose FPU is not the point. One decimal is as much as a progress column can
  * use. */
-static void human(uint64_t bytes, char *out, size_t cap)
-{
-    static const char *const unit[] = {"B", "KB", "MB", "GB"};
-    unsigned u = 0;
-    uint64_t whole = bytes;
-    uint64_t tenth = 0;
-
-    while (whole >= 1024U && u < 3U) {
-        tenth = ((whole % 1024U) * 10U) / 1024U;
-        whole /= 1024U;
-        u++;
-    }
-    if (u == 0)
-        (void)snprintf(out, cap, "%lu B", (unsigned long)whole);
-    else
-        (void)snprintf(out, cap, "%lu.%lu %s", (unsigned long)whole, (unsigned long)tenth,
-                       unit[u]);
-}
-
-static const char *kind_name(uint8_t kind)
-{
-    switch (kind) {
-    case WL_KIND_EXEC:
-        return "command";
-    case WL_KIND_PUT:
-        return "receiving";
-    case WL_KIND_GET:
-        return "sending";
-    case WL_KIND_SYNC:
-        return "sync";
-    default:
-        return "?";
-    }
-}
-
 /* Called from LVN_GETDISPINFO, so the caller already holds the lock. */
 static void row_text(const struct wl_mon_row *r, int col, char *out, size_t cap)
 {
-    char a[32];
-    char b[32];
-
     switch (col) {
     case 0:
-        (void)snprintf(out, cap, "%s", kind_name(r->kind));
+        (void)snprintf(out, cap, "%s", wl_mon_kind_name(r->kind));
         break;
     case 1:
         (void)snprintf(out, cap, "%s", r->session);
@@ -327,30 +289,11 @@ static void row_text(const struct wl_mon_row *r, int col, char *out, size_t cap)
         (void)snprintf(out, cap, "%s", r->name);
         break;
     case 3:
-        human(r->done, a, sizeof(a));
-        if (r->kind == WL_KIND_EXEC) {
-            /* A command has no size to work towards, so there is no percentage
-             * to reach. What it has sent back is worth showing, but it is not
-             * progress: a command that prints nothing sits at zero for its
-             * whole run, and a bare "0 B" there reads like a stall. */
-            (void)snprintf(out, cap, "Running (%s out)", a);
-        } else if (r->total == 0) {
-            (void)snprintf(out, cap, "%s", a);
-        } else {
-            human(r->total, b, sizeof(b));
-            (void)snprintf(out, cap, "%s of %s (%lu%%)", a, b,
-                           (unsigned long)(r->done * 100U / r->total));
-        }
+        wl_mon_progress(r, out, cap);
         break;
-    default: {
-        unsigned long secs = wl_clock_since(r->started_ms) / 1000UL;
-
-        if (secs < 60UL)
-            (void)snprintf(out, cap, "%lus", secs);
-        else
-            (void)snprintf(out, cap, "%lum %02lus", secs / 60UL, secs % 60UL);
+    default:
+        wl_mon_elapsed(wl_clock_since(r->started_ms), out, cap);
         break;
-    }
     }
 }
 
@@ -945,7 +888,7 @@ static void refresh(void)
         (void)snprintf(app.status_text, sizeof(app.status_text), "%s",
                        state_text(state, wl_monitor_client(app.mon)));
         set_part(0, app.status_text);
-        human(tot.bytes, bytes, sizeof(bytes));
+        wl_mon_bytes(tot.bytes, bytes, sizeof(bytes));
         (void)snprintf(buf, sizeof(buf), "%lu command(s), %lu transfer(s), %s",
                        (unsigned long)tot.commands, (unsigned long)tot.transfers, bytes);
         set_part(3, buf);

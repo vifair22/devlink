@@ -48,7 +48,7 @@ AGENT_SOURCES  := $(AGENT_ENTRY) $(AGENT_SHARED)
 AGENTW_SOURCES := $(AGENTW_ENTRY) $(AGENT_SHARED)
 # The Linux agent: the same core over the POSIX layer, minus what only the
 # client uses (the multiplexer and its socket).
-LINUX_AGENT_SOURCES := $(CORE_SOURCES) $(SRC_DIR)/linux/main.c \
+LINUX_AGENT_SOURCES := $(CORE_SOURCES) $(SRC_DIR)/linux/main.c $(SRC_DIR)/linux/tui_term.c \
                        $(addprefix $(SRC_DIR)/posix/,clock.c fs.c proc.c random.c serial.c tcp.c \
                        wait.c)
 
@@ -248,7 +248,8 @@ $(AGENTW): $(CORE_SOURCES) $(AGENTW_SOURCES) $(WAT_VENDOR_OBJS) $(WAT_RES) | $(B
 LINUX_AGENT      := $(BIN_DIR)/devlink-agent
 LINUX_AGENT_DIR  := $(BUILD_DIR)/linux-agent
 LINUX_AGENT_ARCH ?=
-LINUX_AGENT_CFLAGS := $(LINUX_AGENT_ARCH) -DDEVLINK_AGENT
+# -pthread: serve --tui runs the agent loop on a thread beside the screen.
+LINUX_AGENT_CFLAGS := $(LINUX_AGENT_ARCH) -DDEVLINK_AGENT -pthread
 LINUX_AGENT_CPPFLAGS := -I$(INC_DIR) -isystem $(ZLIB_DIR) -isystem $(MONO_DIR) -D_GNU_SOURCE \
                         -DDEVLINK_VERSION='"$(VERSION)_$(BUILD_ID).linux"'
 LINUX_AGENT_OBJS := $(patsubst $(SRC_DIR)/%.c,$(LINUX_AGENT_DIR)/%.o,$(LINUX_AGENT_SOURCES)) \
@@ -428,10 +429,10 @@ analyze:
 	    -fanalyzer -fsyntax-only $(NATIVE_SOURCES)
 	@echo "== gcc -fanalyzer (Linux agent)"
 	@$(CC) $(CPPFLAGS_COMMON) -DVARIANT=analyze -DDEVLINK_AGENT $(CFLAGS_COMMON) -O2 \
-	    -fanalyzer -fsyntax-only $(SRC_DIR)/linux/main.c $(SRC_DIR)/posix/clock.c
+	    -fanalyzer -fsyntax-only $(SRC_DIR)/linux/main.c $(SRC_DIR)/linux/tui_term.c $(SRC_DIR)/posix/clock.c
 	@echo "== stack usage"
 	@rm -rf $(BUILD_DIR)/stack && mkdir -p $(BUILD_DIR)/stack
-	@for f in $(NATIVE_SOURCES) $(SRC_DIR)/linux/main.c; do \
+	@for f in $(NATIVE_SOURCES) $(SRC_DIR)/linux/main.c $(SRC_DIR)/linux/tui_term.c; do \
 	    obj=$(BUILD_DIR)/stack/$$(echo $$f | tr / _ | sed 's/\.c$$/.o/'); \
 	    $(CC) $(CPPFLAGS_COMMON) -DVARIANT=stack $(CFLAGS_COMMON) -O2 \
 	        -fstack-usage -c $$f -o $$obj || exit 1; \
@@ -459,7 +460,7 @@ tidy:
 	@echo $(NATIVE_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
 	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -std=c11
 	@echo "== Linux agent"
-	@echo $(SRC_DIR)/linux/main.c $(SRC_DIR)/posix/clock.c | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
+	@echo $(SRC_DIR)/linux/main.c $(SRC_DIR)/linux/tui_term.c $(SRC_DIR)/posix/clock.c | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
 	    clang-tidy {} -- $(CPPFLAGS_COMMON) -DVARIANT=tidy -DDEVLINK_AGENT -std=c11
 	@echo "== tests"
 	@echo $(TEST_SOURCES) | tr ' ' '\n' | xargs -P$(JOBS) -I{} \
