@@ -20,7 +20,9 @@
 #include "devlink/clock.h"
 #include "devlink/file_ops.h"
 #include "devlink/mux.h"
+#include "devlink/noise.h"
 #include "devlink/proto.h"
+#include "devlink/tcplink.h"
 #include "devlink/usock.h"
 
 /*
@@ -59,6 +61,12 @@ static struct {
     pthread_t mux_th;
     wl_status agent_result;
     wl_status mux_result;
+    /* For a line that runs the TCP link layer (encrypted, keyed), as a
+     * tcp:HOST line does: the agent answers the handshake, the multiplexer
+     * starts it. */
+    uint8_t psk[WL_NOISE_KEYLEN];
+    struct wl_tcplink_cfg agent_tcp;
+    struct wl_tcplink_cfg mux_tcp;
 } h;
 
 static int should_stop(void *ctx)
@@ -142,6 +150,44 @@ static int setup_late_agent(void **state)
 {
     (void)state;
     return setup_common(400, 0);
+}
+
+/*
+ * The line runs the TCP link layer, keyed, exactly as the multiplexer holds a
+ * tcp:HOST line; the pty stands in for the socket, since the link only needs
+ * a reliable byte stream. Clients still reach the multiplexer in the clear
+ * over its Unix socket, which is the part that broke: the local sessions
+ * inherited the line's link layer and tried to run the TCP handshake on it.
+ */
+static int setup_tcplink(void **state)
+{
+    (void)state;
+    memset(&h, 0, sizeof(h));
+    wl_noise_psk_from_passphrase("mux test key", 12, h.psk);
+    wl_tcplink_cfg_init(&h.agent_tcp);
+    h.agent_tcp.initiator = 0;
+    h.agent_tcp.psk = h.psk;
+    wl_tcplink_cfg_init(&h.mux_tcp);
+    h.mux_tcp.initiator = 1;
+    h.mux_tcp.psk = h.psk;
+    pty_pair(&h.agent_t, &h.line_t);
+    (void)snprintf(h.sock, sizeof(h.sock), "/tmp/devlink-test-%ld.sock", (long)getpid());
+    (void)remove(h.sock);
+    (void)snprintf(h.dir, sizeof(h.dir), "/tmp/devlink-mux-%ld", (long)getpid());
+    (void)mkdir(h.dir, 0700);
+    h.agent_cfg.session = fast_session();
+    h.agent_cfg.session.make_link = wl_tcplink_make;
+    h.agent_cfg.session.make_link_arg = &h.agent_tcp;
+    h.agent_cfg.platform = WL_PLATFORM_LINUX;
+    h.agent_cfg.stop = agent_should_stop;
+    h.mux_cfg.session = fast_session();
+    h.mux_cfg.session.make_link = wl_tcplink_make;
+    h.mux_cfg.session.make_link_arg = &h.mux_tcp;
+    h.mux_cfg.socket_path = h.sock;
+    h.mux_cfg.stop = should_stop;
+    assert_int_equal(pthread_create(&h.agent_th, NULL, agent_main, NULL), 0);
+    assert_int_equal(pthread_create(&h.mux_th, NULL, mux_main, NULL), 0);
+    return 0;
 }
 
 /* Both ends paced to a serial line's rate (half of 115200 baud's, so the test
@@ -278,6 +324,28 @@ static void test_a_client_reaches_the_agent_through_the_multiplexer(void **state
      * asked about is the far end of the line. */
     assert_int_equal(hello.platform, WL_PLATFORM_LINUX);
     assert_int_equal(hello.proto, WL_PROTO_VERSION);
+}
+
+/*
+ * A multiplexer holding a TCP line serves local clients: info, then a real
+ * command. It used to hand each local client the line's TCP link layer, so
+ * neither end finished a handshake and every command through it failed after
+ * five seconds with "the peer closed the socket".
+ */
+static void test_a_tcp_line_serves_local_clients(void **state)
+{
+    struct job j;
+
+    (void)state;
+    wait_for_the_line();
+    memset(&j, 0, sizeof(j));
+    j.cmd = "echo held";
+    assert_int_equal(pthread_create(&j.th, NULL, run_job, &j), 0);
+    join_within(&j, 4000);
+    assert_int_equal(j.st, WL_OK);
+    assert_true(j.r.ran);
+    assert_int_equal(j.r.exit_code, 0);
+    assert_true(j.cap.len >= 5U && memcmp(j.cap.out, "held\n", 5) == 0);
 }
 
 /*
@@ -766,6 +834,8 @@ int main(void)
         cmocka_unit_test(test_a_line_that_is_not_there_still_names_a_socket),
         cmocka_unit_test_setup_teardown(test_a_client_reaches_the_agent_through_the_multiplexer,
                                         setup, teardown),
+        cmocka_unit_test_setup_teardown(test_a_tcp_line_serves_local_clients, setup_tcplink,
+                                        teardown),
         cmocka_unit_test_setup_teardown(test_two_clients_run_at_once_without_disturbing_each_other,
                                         setup, teardown),
         cmocka_unit_test_setup_teardown(test_more_commands_than_slots_all_run_in_turn, setup,

@@ -757,10 +757,16 @@ static void accept_client(struct mux *m, int listen_fd)
     h.closed = down_closed;
     h.error = down_error;
     /* The socket is reliable and local, so there is nothing to pace and no
-     * reason to spend effort compressing what never leaves the machine. */
+     * reason to spend effort compressing what never leaves the machine. Nor
+     * is there a link layer to carry over: a tcp: line's is the encrypted
+     * TCP link, as the side that starts the handshake, and a local client
+     * speaks the plain one, so a copied link layer left both ends waiting
+     * for a handshake the other never sent. */
     cfg = m->cfg->session;
     cfg.link.bytes_per_sec = 0;
     cfg.level = 0;
+    cfg.make_link = NULL;
+    cfg.make_link_arg = NULL;
     c->peer = wl_peer_new(&cfg, m->seed++, wl_clock_ms(), 0, WL_PLATFORM_LINUX, &h);
     if (c->peer == NULL) {
         wl_transport_close(&c->t);
