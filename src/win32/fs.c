@@ -71,9 +71,13 @@ wl_status wl_fs_replace(const char *from, const char *to)
         resolved = 1;
     }
     if (move_ex != NULL) {
-        if (!move_ex(from, to, MOVEFILE_REPLACE_EXISTING))
+        if (move_ex(from, to, MOVEFILE_REPLACE_EXISTING))
+            return WL_OK;
+        /* Windows 98's kernel32 exports MoveFileExA as a stub that fails
+         * with ERROR_CALL_NOT_IMPLEMENTED, so the export alone does not say
+         * the call works: that failure takes the 9x path below. */
+        if (GetLastError() != ERROR_CALL_NOT_IMPLEMENTED)
             return wl_fail(WL_ERR_IO, "cannot replace %s (%lu)", to, GetLastError());
-        return WL_OK;
     }
     (void)DeleteFileA(to);
     if (!MoveFileA(from, to))
